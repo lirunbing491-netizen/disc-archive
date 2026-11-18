@@ -20,6 +20,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '使用说明.txt') -Destination
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $release 'LICENSE') -Force
 
 # 只打包这五个文件；即使 dist 中有其他文件，也不会进入发行包。
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $files = @('导盘助手.exe', '导盘助手.exe.config', 'LabelOcr.ps1', '使用说明.txt', 'LICENSE')
 $zipPath = Join-Path $dist 'DiscArchive-Windows.zip'
