@@ -15,6 +15,7 @@ namespace DiscArchive
     {
         public string Id, Title, Project, Status, Note, Photo, JobDir, TargetRoot, TargetId, Drive, Created;
         public string TargetName;
+        public string RegistrationId;
         public string TitleState;
         public string OriginalPhoto;
         public string ProjectHint, DiscLabel, PhotoText, VisionNote, NamingReason, Report;
@@ -76,16 +77,19 @@ namespace DiscArchive
                         targetId = Guid.NewGuid().ToString("N");
                         AtomicText(markerPath, targetId);
                     }
-                }
-                string id = AllocateId();
-                string localDir = Path.Combine(stateDir, "entries", id);
-                string jobDir = Path.Combine(root, "DiscArchive", id);
-                if (Directory.Exists(jobDir) || Directory.Exists(localDir)) throw new IOException("归档目录已存在，已停止以防覆盖。");
+                // Keep the target lock until publication: cloned workstation sequences must
+                // advance past published IDs instead of racing for the same directory.
+                string id, localDir, jobDir;
+                do {
+                    id = AllocateId();
+                    localDir = Path.Combine(stateDir, "entries", id);
+                    jobDir = Path.Combine(root, "DiscArchive", id);
+                } while (Directory.Exists(jobDir) || File.Exists(jobDir) || Directory.Exists(localDir) || File.Exists(localDir));
                 string extension = Path.GetExtension(photoPath);
                 string localPhoto = Path.Combine(localDir, "thumbnail.jpg");
                 string archivedPhoto = Path.Combine(jobDir, "photo" + extension);
                 Entry entry = new Entry {
-                    Id = id, Title = id, Project = project ?? "", Status = "等待放盘", Note = "",
+                    Id = id, RegistrationId = Guid.NewGuid().ToString("N"), Title = id, Project = project ?? "", Status = "等待放盘", Note = "",
                     Photo = localPhoto, OriginalPhoto = archivedPhoto, JobDir = jobDir, TargetRoot = root, TargetId = targetId,
                     TargetName = TargetName(root), ProjectHint=project ?? "", TitleState = "待确认", Drive = drive ?? "",
                     Created = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
@@ -129,6 +133,7 @@ namespace DiscArchive
                         CleanAttempt(remoteMoved ? jobDir : remotePending, new string[] { "photo" + extension, "entry.xml", "登记信息.txt" });
                     throw;
                 }
+                }
             }
             }
         }
@@ -142,7 +147,7 @@ namespace DiscArchive
                 int index = entries.FindIndex(delegate(Entry item) { return item.Id == e.Id; });
                 if (index < 0) throw new InvalidOperationException("该盘尚未登记。");
                 Entry old = entries[index];
-                if (old.TargetId != e.TargetId || old.TargetRoot != e.TargetRoot || old.JobDir != e.JobDir || old.Photo != e.Photo || old.OriginalPhoto != e.OriginalPhoto || old.Created != e.Created)
+                if (old.TargetId != e.TargetId || old.TargetRoot != e.TargetRoot || old.JobDir != e.JobDir || old.Photo != e.Photo || old.OriginalPhoto != e.OriginalPhoto || old.Created != e.Created || old.RegistrationId != e.RegistrationId)
                     throw new InvalidOperationException("不能修改盘号对应的目标位置、照片或创建时间。");
                 entries[index] = e;
                 Write(entries);
@@ -182,6 +187,104 @@ namespace DiscArchive
             AtomicText(Path.GetFullPath(csvPath), csv.ToString());
         }
 
+        // Each published per-disc replica is authoritative for target-wide discovery.
+        // This deliberately creates no shared catalog and acquires no write lock.
+        public int ExportTarget(string targetRoot, string csvPath)
+        {
+            if (String.IsNullOrWhiteSpace(targetRoot) || !Directory.Exists(targetRoot))
+                throw new DirectoryNotFoundException("目标目录不存在或未连接。");
+            string root = Path.GetFullPath(targetRoot);
+            string archive = Path.Combine(root, "DiscArchive");
+            StringBuilder csv = new StringBuilder("盘号,标题,标题确认,项目,状态,备注,照片,原图,登记目录,目标硬盘,目标路径,目标标识,光驱,登记时间,完整文件数,完整字节数,失败条目,项目目录,卷标,盘面候选,命名依据,抢救记录,时间提示\r\n");
+            int count = 0;
+            bool archiveExists;
+            try { archiveExists = (File.GetAttributes(archive) & FileAttributes.Directory) != 0;
+                if (!archiveExists) throw new IOException("DiscArchive 位置不是目录。"); }
+            catch (FileNotFoundException) { archiveExists = false; }
+            catch (DirectoryNotFoundException) { archiveExists = false; }
+            if (archiveExists)
+            {
+                CheckNoLinks(archive);
+                string[] directories = Directory.GetDirectories(archive);
+                Array.Sort(directories, StringComparer.OrdinalIgnoreCase);
+                foreach (string directory in directories)
+                {
+                    string name = Path.GetFileName(directory);
+                    int pending = name.LastIndexOf(".pending-", StringComparison.Ordinal);
+                    Guid ignored;
+                    if (pending > 0 && Guid.TryParseExact(name.Substring(pending + 9), "N", out ignored)) continue;
+                    try
+                    {
+                        CheckNoLinks(directory);
+                        string replica = Path.Combine(directory, "entry.xml");
+                        CheckNoLinks(replica);
+                        List<Entry> records = ReadFile(replica);
+                        if (records == null || records.Count != 1 || records[0] == null || records[0].Id != name)
+                            throw new IOException("盘号与所在目录不符，或记录数量无效。");
+                        Entry e = records[0];
+                        List<string> projects = new List<string>();
+                        foreach (string folder in e.ArchiveFolders ?? new string[0])
+                            projects.Add(CurrentChild(root, folder));
+                        string original = "";
+                        foreach (string photo in Directory.GetFiles(directory, "photo.*"))
+                        {
+                            if (Path.GetExtension(photo).Equals(".bak", StringComparison.OrdinalIgnoreCase)) continue;
+                            CheckNoLinks(photo);
+                            if (original.Length > 0) throw new IOException("盘面原图不唯一，无法确定当前原图路径。");
+                            original = photo;
+                        }
+                        string report = RebaseReport(e, directory);
+                        string[] values = { e.Id, e.Title, e.TitleState, e.Project, e.Status, e.Note, original, original, directory,
+                            TargetName(root), root, e.TargetId, e.Drive, e.Created,
+                            e.Files.ToString(CultureInfo.InvariantCulture), e.Bytes.ToString(CultureInfo.InvariantCulture),
+                            e.Failed.ToString(CultureInfo.InvariantCulture), String.Join(" / ", projects.ToArray()),
+                            e.DiscLabel, e.PhotoText, e.NamingReason, report, e.Warnings.ToString(CultureInfo.InvariantCulture) };
+                        for (int i = 0; i < values.Length; i++) { if (i > 0) csv.Append(','); csv.Append(Csv(values[i])); }
+                        csv.Append("\r\n");
+                        count++;
+                    }
+                    catch (Exception error)
+                    {
+                        if (!(error is IOException) && !(error is UnauthorizedAccessException) && !(error is InvalidOperationException) && !(error is ArgumentException)) throw;
+                        throw new IOException("目标汇总未完成，未写出CSV。无法读取登记目录：" + directory + "。" + error.Message, error);
+                    }
+                }
+            }
+            AtomicText(Path.GetFullPath(csvPath), csv.ToString());
+            return count;
+        }
+
+        private static string CurrentChild(string parent, string leaf)
+        {
+            if (String.IsNullOrWhiteSpace(leaf) || leaf == "." || leaf == ".." || leaf != Path.GetFileName(leaf) ||
+                leaf.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || leaf.EndsWith(".") || leaf.EndsWith(" "))
+                throw new IOException("共享记录中的目录名称无效。");
+            string path = Path.Combine(parent, leaf);
+            CheckNoLinks(path);
+            return path;
+        }
+
+        private static string RebaseReport(Entry e, string currentDirectory)
+        {
+            if (String.IsNullOrEmpty(e.Report) || String.IsNullOrEmpty(e.JobDir)) return "";
+            string prefix = e.JobDir.TrimEnd('\\', '/') + "\\";
+            string stored = e.Report.Replace('/', '\\');
+            if (!stored.StartsWith(prefix.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase)) return "";
+            string result = currentDirectory;
+            foreach (string part in stored.Substring(prefix.Length).Split('\\')) result = CurrentChild(result, part);
+            return result;
+        }
+
+        private static void CheckNoLinks(string path)
+        {
+            for (string current = path; !String.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+            {
+                try { if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("归档路径包含目录链接：" + current); }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+            }
+        }
+
         private static string Csv(string value)
         {
             value = value ?? "";
@@ -204,6 +307,8 @@ namespace DiscArchive
             try { string name = new DriveInfo(Path.GetPathRoot(root)).VolumeLabel; if (!String.IsNullOrEmpty(name)) return name; }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+            catch (ArgumentException) { } // DriveInfo does not accept ordinary UNC share roots.
+            catch (NotSupportedException) { }
             return root;
         }
 
@@ -248,7 +353,28 @@ namespace DiscArchive
 
         private static List<Entry> ReadFile(string path)
         {
-            using (FileStream stream = File.OpenRead(path)) return (List<Entry>)Serializer.Deserialize(stream);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(3);
+            while (true)
+            {
+                try { return ReadFileOnce(path); }
+                catch (IOException error)
+                {
+                    // SMB ReplaceFile may briefly hold an exclusive server handle; file
+                    // systems using the rename fallback also have a short publication gap.
+                    // Persistent missing or unreadable records still fail explicitly.
+                    int code = error.HResult & 0xffff;
+                    if ((code != 2 && code != 3 && code != 32 && code != 33) || DateTime.UtcNow >= deadline) throw;
+                    Thread.Sleep(20);
+                }
+            }
+        }
+
+        private static List<Entry> ReadFileOnce(string path)
+        {
+            System.Xml.XmlReaderSettings settings = new System.Xml.XmlReaderSettings { DtdProcessing = System.Xml.DtdProcessing.Prohibit, XmlResolver = null };
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            using (System.Xml.XmlReader reader = System.Xml.XmlReader.Create(stream, settings))
+                return (List<Entry>)Serializer.Deserialize(reader);
         }
 
         private void Write(List<Entry> entries)
@@ -258,7 +384,18 @@ namespace DiscArchive
 
         private void WriteReplica(Entry e)
         {
-            WriteReplicaTo(e, e.JobDir);
+            using (Acquire(Path.Combine(e.TargetRoot, ".discarchive-target.lock")))
+            {
+                string path = Path.Combine(e.JobDir, "entry.xml");
+                if (!File.Exists(path)) throw new IOException("目标登记复本缺失，已停止写入以防覆盖其他工位。");
+                List<Entry> existing = ReadFile(path);
+                if (existing == null || existing.Count != 1 || existing[0] == null) throw new IOException("目标登记复本无效。");
+                Entry owner = existing[0];
+                if (owner.Id != e.Id || owner.TargetId != e.TargetId || owner.RegistrationId != e.RegistrationId ||
+                    (String.IsNullOrEmpty(e.RegistrationId) && (owner.Created != e.Created || owner.Photo != e.Photo || owner.JobDir != e.JobDir || owner.TargetRoot != e.TargetRoot || owner.OriginalPhoto != e.OriginalPhoto)))
+                    throw new IOException("目标登记复本属于其他登记，已停止写入。");
+                WriteReplicaTo(e, e.JobDir);
+            }
         }
 
         private void WriteReplicaTo(Entry e, string directory)

@@ -1,7 +1,7 @@
 ﻿$ErrorActionPreference = 'Stop'
 $src = Join-Path $PSScriptRoot 'src'
 $dist = Join-Path $PSScriptRoot 'dist'
-$release = Join-Path $dist 'DiscArchive'
+$release = Join-Path $dist 'DiscArchive-MultiDrive'
 [void][IO.Directory]::CreateDirectory($release)
 $exe = Join-Path $release '导盘助手.exe'
 $compiler = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -23,7 +23,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Pa
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $files = @('导盘助手.exe', '导盘助手.exe.config', 'LabelOcr.ps1', '使用说明.txt', 'LICENSE')
-$zipPath = Join-Path $dist 'DiscArchive-Windows.zip'
+$zipPath = Join-Path $dist 'DiscArchive-MultiDrive-Windows.zip'
 $tempZip = Join-Path $dist ('DiscArchive-package-' + [Guid]::NewGuid().ToString('N') + '.zip')
 $archive = $null
 try {
@@ -31,7 +31,7 @@ try {
     foreach ($name in $files) {
         $file = Join-Path $release $name
         if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "缺少发行文件：$name" }
-        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, ('DiscArchive/' + $name), [IO.Compression.CompressionLevel]::Optimal)
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, ('DiscArchive-MultiDrive/' + $name), [IO.Compression.CompressionLevel]::Optimal)
     }
     $archive.Dispose()
     $archive = $null

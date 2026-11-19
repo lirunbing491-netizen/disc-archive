@@ -15,7 +15,7 @@ namespace DiscArchive
             bool first;
             using (Mutex instance = new Mutex(true, @"Local\DiscArchive.Workstation.v1", out first))
             {
-                if (!first) { MessageBox.Show("导盘助手已打开。请切回原窗口。", "导盘助手"); return; }
+                if (!first) { MessageBox.Show("已有一个导盘助手窗口在运行。多光驱版可在同一个窗口选择多台光驱；如当前用的是旧版，请等任务结束并退出后再打开测试版。", "导盘助手"); return; }
                 try
                 {
                     string previous = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DiscArchive", "工作站");
@@ -27,16 +27,18 @@ namespace DiscArchive
         }
         internal static string PrepareTrial(string previous)
         {
-            string trial=Path.Combine(previous,"抢救版");
+            string trial=Path.Combine(previous,"多光驱版");
             if(Directory.Exists(trial)) return trial;
             Directory.CreateDirectory(previous);
-            string stage=Path.Combine(previous,"抢救版-初始化-"+Guid.NewGuid().ToString("N"));
+            string v1=Path.Combine(previous,"抢救版");
+            string source=Directory.Exists(v1) ? v1 : previous;
+            string stage=Path.Combine(previous,"多光驱版-初始化-"+Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(stage);
             // v1 cannot round-trip the new XML fields. Isolate the catalog while keeping
             // existing records and their thumbnail paths accessible in the parent directory.
             foreach(string name in new[]{"catalog.xml","catalog.xml.bak","sequence.txt","设置.xml"})
             {
-                string src=Path.Combine(previous,name);
+                string src=Path.Combine(source,name);
                 if(File.Exists(src)) File.Copy(src,Path.Combine(stage,name),false);
             }
             Directory.Move(stage,trial);

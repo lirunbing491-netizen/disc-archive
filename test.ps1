@@ -19,12 +19,12 @@ $work = Join-Path ([IO.Path]::GetTempPath()) ('DiscArchive-PublicTests-' + [guid
 Write-Output ('Generated test artifacts: ' + $work)
 Write-Output 'No physical media or camera capture is used. UI construction may enumerate cameras read-only. Model requests use loopback only.'
 $count = 0
-foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical','Camera','CompletionNotice','VisionSettings','Endpoint','Workflow')) {
+foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical','Camera','CompletionNotice','VisionSettings','Endpoint','Workflow','MultiDrive')) {
     $dir = Join-Path $work $name
     [void][IO.Directory]::CreateDirectory($dir)
     $exe = Join-Path $dir ($name + 'Tests.exe')
     $entry = $name + 'Tests'
-    if ($name -eq 'Workflow') { $entry = 'DiscArchive.WorkflowTests' }
+    if ($name -in @('Workflow','MultiDrive')) { $entry = 'DiscArchive.' + $name + 'Tests' }
     $testSource = Join-Path $PSScriptRoot ('tests\' + $name + 'Tests.cs')
     & $compiler /nologo /langversion:5 /codepage:65001 /target:exe /platform:anycpu "/main:$entry" "/out:$exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Xml.Linq.dll /r:System.Web.Extensions.dll /r:System.Security.dll $inputs $testSource
     if ($LASTEXITCODE -ne 0) { throw ($name + ' test compilation failed.') }

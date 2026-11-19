@@ -55,19 +55,25 @@ namespace DiscArchive
         private readonly Func<string> readMode;
         internal bool RecognitionFinished { get { return reading!=null && reading.IsCompleted; } }
 
-        internal Workstation(Catalog book, IReader reader, Func<string,CancellationToken,string> recognizer=null,Func<string> mode=null)
+        internal Workstation(Catalog book, IReader reader, Func<string,CancellationToken,string> recognizer=null,Func<string> mode=null,bool recoverInterrupted=true)
         {
             Book = book;
             Reader = reader;
             recognize = recognizer;
             readMode = mode ?? delegate { return "metadata"; };
+            if(!recoverInterrupted) return;
+            RecoverInterrupted(book);
+        }
+
+        internal static void RecoverInterrupted(Catalog book)
+        {
             foreach (Entry e in book.List())
             {
                 if (e.Status != Running && e.Status != Waiting && e.Status != Planning && e.Status != "复制校验中") continue;
                 if(e.Status==Running && book.IsOriginalTarget(e)) RecoverCounts(e);
                 e.Status = e.Files>0 ? Partial : Review;
                 e.Note = "上次在登记或读取期间退出。请核对盘面，再用原盘号重新读取。 " + e.Note;
-                Book.Save(e);
+                book.Save(e);
             }
         }
 

@@ -36,8 +36,65 @@ internal static class RescueTests
         }), "fixture must actually block metadata writes");
         return handle;
     }
-    public static int Main()
+    private static int ConcurrentWorker(string[] args)
     {
+        try
+        {
+            CancellationTokenSource c = new CancellationTokenSource(); bool signaled = false;
+            IDictionary<string,string> map = args[5] == "mapped" ? new Dictionary<string,string>{{"项目","项目"}} : null;
+            RescueResult r = RescueCopy.Run(args[1], args[2], "项目", map, "duplicate-disc", args[3], delegate(string message) {
+                if (signaled) return; signaled = true; File.WriteAllText(args[4] + ".ready", "ready");
+                Stopwatch timer = Stopwatch.StartNew();
+                while (!File.Exists(args[4] + ".go")) { if(timer.ElapsedMilliseconds > 15000) throw new IOException("barrier timeout"); Thread.Sleep(20); }
+                if(args[6] == "cancel") c.Cancel();
+            }, null, c.Token);
+            Console.WriteLine("files=" + r.Files + ";failed=" + r.Failed); return r.Failed == 0 ? 0 : 2;
+        }
+        catch(RescueCanceledException) { return args[6] == "cancel" ? 0 : 3; }
+        catch(Exception e) { Console.Error.WriteLine(e); return 4; }
+    }
+    private static string Q(string value) { return "\"" + value + "\""; }
+    private static void ConcurrentPair(string other, bool mapped, bool cancelFirst, bool crashFirst = false)
+    {
+        string fixture=Path.GetDirectoryName(source); string[] barriers={Path.Combine(fixture,"barrier-a"),Path.Combine(fixture,"barrier-b")};
+        string[] sources={source,other}; Process[] workers=new Process[2];
+        try
+        {
+            for(int i=0;i<2;i++)
+            {
+                string arguments="--concurrent-worker " + Q(sources[i]) + " " + Q(target) + " " + Q(attempt) + " " + Q(barriers[i]) + " " + (mapped?"mapped":"normal") + " " + (i==0 && cancelFirst?"cancel":"copy");
+                workers[i]=Process.Start(new ProcessStartInfo(System.Reflection.Assembly.GetExecutingAssembly().Location, arguments) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true});
+            }
+            Stopwatch timer=Stopwatch.StartNew();
+            while(!File.Exists(barriers[0]+".ready") || !File.Exists(barriers[1]+".ready"))
+            {
+                Assert(timer.ElapsedMilliseconds<15000,"both processes must reach source reading concurrently; allocation must not serialize copying");
+                for(int i=0;i<2;i++) if(workers[i].HasExited) throw new Exception("worker exited before barrier: "+workers[i].StandardError.ReadToEnd());
+                Thread.Sleep(20);
+            }
+            if(crashFirst) { workers[0].Kill(); workers[0].WaitForExit(); }
+            for(int i=0;i<2;i++) File.WriteAllText(barriers[i]+".go","go");
+            for(int i=0;i<2;i++)
+            {
+                Assert(workers[i].WaitForExit(20000),"worker completes");
+                string output=workers[i].StandardOutput.ReadToEnd(), error=workers[i].StandardError.ReadToEnd();
+                if(i==0 && crashFirst) continue;
+                Assert(workers[i].ExitCode==0,"worker "+i+": "+output+error);
+                if(!(i==0 && cancelFirst)) Assert(output.Contains("failed=0"),"competition is not a source failure");
+            }
+        }
+        finally { foreach(Process worker in workers) if(worker!=null) { if(!worker.HasExited) worker.Kill(); worker.Dispose(); } }
+    }
+    private static void Payloads(string folder, params string[] expected)
+    {
+        List<string> actual=new List<string>(); foreach(string file in Directory.GetFiles(folder,"*.bin",SearchOption.AllDirectories)) actual.Add(File.ReadAllText(file));
+        actual.Sort(StringComparer.Ordinal); Array.Sort(expected,StringComparer.Ordinal);
+        Assert(actual.Count==expected.Length,"payload count "+actual.Count+" expected "+expected.Length);
+        for(int i=0;i<expected.Length;i++) Assert(actual[i]==expected[i],"payload bytes/ownership "+i);
+    }
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && args[0] == "--concurrent-worker") return ConcurrentWorker(args);
         root = Path.Combine(Path.GetTempPath(), "DiscArchiveRescueTests-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         try
         {
@@ -263,6 +320,52 @@ internal static class RescueTests
                 finally { Directory.Delete(linked); }
             });
             Test("reused attempts get independent records and old file preserved", delegate { Put("a", "a"); RescueResult a = Run(); RescueResult b = Run(); Assert(a.Report != b.Report && b.Files == 1 && File.Exists(a.Report), "independent retries"); });
+            Test("two real processes same project same top directory and duplicate disc IDs", delegate {
+                Put("same\\a.bin","process-a"); string other=Path.Combine(Path.GetDirectoryName(source),"source-b"); Directory.CreateDirectory(Path.Combine(other,"same")); File.WriteAllText(Path.Combine(other,"same\\a.bin"),"process-b");
+                ConcurrentPair(other,false,false); Payloads(Path.Combine(target,"项目"),"process-a","process-b");
+                Assert(Directory.GetDirectories(Path.Combine(target,"项目"),"来源-*").Length==1,"one competing tree isolated");
+                Run(); Run(); Payloads(Path.Combine(target,"项目"),"process-a","process-b","process-a","process-a");
+            });
+            Test("two real processes different top groups copy concurrently in one project", delegate {
+                Put("alpha\\a.bin","alpha"); string other=Path.Combine(Path.GetDirectoryName(source),"source-b"); Directory.CreateDirectory(Path.Combine(other,"beta")); File.WriteAllText(Path.Combine(other,"beta\\b.bin"),"beta");
+                ConcurrentPair(other,false,false); Payloads(Path.Combine(target,"项目"),"alpha","beta");
+                Assert(File.Exists(Path.Combine(target,"项目\\alpha\\a.bin")) && File.Exists(Path.Combine(target,"项目\\beta\\b.bin")),"distinct groups retain roots");
+            });
+            Test("two real processes mapped groups claim all siblings as a unit", delegate {
+                Put("项目\\shared\\a.bin","a-tree"); Put("项目\\a.bin","a-sidecar"); string other=Path.Combine(Path.GetDirectoryName(source),"source-b"); Directory.CreateDirectory(Path.Combine(other,"项目\\shared")); File.WriteAllText(Path.Combine(other,"项目\\shared\\b.bin"),"b-tree"); File.WriteAllText(Path.Combine(other,"项目\\b.bin"),"b-sidecar");
+                ConcurrentPair(other,true,false); Payloads(Path.Combine(target,"项目"),"a-tree","a-sidecar","b-tree","b-sidecar");
+                string[] groups=Directory.GetDirectories(Path.Combine(target,"项目"),"来源-*"); Assert(groups.Length==1,"one group isolated");
+                string[] trees=Directory.GetFiles(Path.Combine(groups[0],"shared"),"*.bin"); Assert(trees.Length==1,"no tree mixing");
+                string sidecar=File.Exists(Path.Combine(groups[0],"a.bin"))?"a":"b"; Assert(File.ReadAllText(trees[0])==sidecar+"-tree" && File.ReadAllText(Path.Combine(groups[0],sidecar+".bin"))==sidecar+"-sidecar","siblings stay owned by same disc");
+            });
+            Test("real concurrent cancellation retains claim and retry never joins another disc", delegate {
+                Put("same\\a.bin","canceled-retry"); string other=Path.Combine(Path.GetDirectoryName(source),"source-b"); Directory.CreateDirectory(Path.Combine(other,"same")); File.WriteAllText(Path.Combine(other,"same\\b.bin"),"completed");
+                ConcurrentPair(other,false,true); Payloads(Path.Combine(target,"项目"),"completed"); Run(); Payloads(Path.Combine(target,"项目"),"completed","canceled-retry");
+                string[] a=Directory.GetFiles(Path.Combine(target,"项目"),"a.bin",SearchOption.AllDirectories), b=Directory.GetFiles(Path.Combine(target,"项目"),"b.bin",SearchOption.AllDirectories);
+                Assert(Path.GetDirectoryName(a[0])!=Path.GetDirectoryName(b[0]),"retry has a different tree owner");
+            });
+            Test("mapped and ordinary top entries cannot claim each other's origin children", delegate {
+                Put("项目\\same.bin","mapped"); Put("same.bin","ordinary");
+                Directory.CreateDirectory(Path.Combine(target,"项目")); File.WriteAllText(Path.Combine(target,"项目\\same.bin"),"legacy");
+                RescueResult r=Run(new Dictionary<string,string>{{"项目","项目"}});
+                Assert(r.Files==2 && r.Failed==0,"both overlapping source groups copied"); Payloads(Path.Combine(target,"项目"),"legacy","mapped","ordinary");
+            });
+            Test("killed real process leaves ownership fenced and retry independent", delegate {
+                Put("same\\a.bin","after-crash"); string other=Path.Combine(Path.GetDirectoryName(source),"source-b"); Directory.CreateDirectory(Path.Combine(other,"same")); File.WriteAllText(Path.Combine(other,"same\\b.bin"),"survivor");
+                ConcurrentPair(other,false,false,true); Run(); Payloads(Path.Combine(target,"项目"),"after-crash","survivor");
+                string[] a=Directory.GetFiles(Path.Combine(target,"项目"),"a.bin",SearchOption.AllDirectories), b=Directory.GetFiles(Path.Combine(target,"项目"),"b.bin",SearchOption.AllDirectories);
+                Assert(Path.GetDirectoryName(a[0])!=Path.GetDirectoryName(b[0]),"crash retry has separate ownership");
+            });
+            Test("cancellation while waiting for allocation lock is not a source error", delegate {
+                Put("a.bin","a"); string area=Path.Combine(target,".discarchive-coordination-v1"); Directory.CreateDirectory(area);
+                CancellationTokenSource c=new CancellationTokenSource(); c.CancelAfter(250);
+                using(FileStream held=new FileStream(Path.Combine(area,"allocation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))
+                {
+                    try { Run(null,null,null,c.Token); throw new Exception("lock wait ignored cancellation"); }
+                    catch(RescueCanceledException e) { Assert(e.Result.Files==0 && e.Result.Failed==0,"canceled allocation receipt"); }
+                }
+                c.Dispose(); Run(); Payloads(Path.Combine(target,"项目"),"a");
+            });
             Console.WriteLine("PASS " + passed + " rescue tests. Isolated fixture: " + root); return 0;
         }
         catch (Exception e) { Console.Error.WriteLine(e); return 1; }

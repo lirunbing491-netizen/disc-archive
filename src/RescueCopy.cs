@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Security.Cryptography;
 using System.Threading;
 
 namespace DiscArchive
@@ -38,6 +39,7 @@ namespace DiscArchive
 
         private sealed class Worker
         {
+            private const string Coordination = ".discarchive-coordination-v1";
             private readonly string source, target, fallback, attempt, disc;
             private readonly Dictionary<string, string> mapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             private readonly Dictionary<string, string> origins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -52,13 +54,13 @@ namespace DiscArchive
 
             internal Worker(string s, string t, string f, IDictionary<string, string> m, string d, string a, Action<string> p, Action v, CancellationToken c)
             {
-                source = Full(s); target = Full(t); attempt = Full(a); Name(f); fallback = f;
+                source = Full(s); target = Full(t); attempt = Full(a); Name(f); ProjectName(f); fallback = f;
                 disc = SafeDisc(d); progress = p; verify = v; cancel = c;
                 if (Within(source, target) || Within(target, source) || Within(source, attempt) || Within(attempt, source))
                     throw new IOException("来源不能与目标或抢救记录目录重叠。");
                 Parents(source); Parents(target); Parents(attempt);
                 if (!Directory.Exists(source) || !Directory.Exists(target)) throw new IOException("来源或目标目录不存在。");
-                if (m != null) foreach (KeyValuePair<string, string> item in m) { Name(item.Key); Name(item.Value); mapping.Add(item.Key, item.Value); }
+                if (m != null) foreach (KeyValuePair<string, string> item in m) { Name(item.Key); Name(item.Value); ProjectName(item.Value); mapping.Add(item.Key, item.Value); }
             }
 
             internal RescueResult Run()
@@ -81,14 +83,24 @@ namespace DiscArchive
                         Enumerate(source, delegate(string entry) {
                             string folder; bool explicitMapping = mapping.TryGetValue(Path.GetFileName(entry), out folder);
                             if (!explicitMapping) folder = fallback;
-                            string project = Path.Combine(target, folder); Parents(project); Directory.CreateDirectory(project);
+                            string project = Path.Combine(target, folder);
                             if (explicitMapping && String.Equals(Path.GetFileName(entry), folder, StringComparison.OrdinalIgnoreCase) && SourceDirectory(entry))
                             {
                                 MapProjectDirectory(entry, project);
                                 return;
                             }
-                            string dst = Path.Combine(project, Path.GetFileName(entry));
-                            if (Conflict(dst)) dst = Path.Combine(Origin(project), Path.GetFileName(entry));
+                            string dst;
+                            using (AllocationLock())
+                            {
+                                Parents(project); Directory.CreateDirectory(project);
+                                dst = Path.Combine(project, Path.GetFileName(entry));
+                                if (Conflict(dst))
+                                {
+                                    dst = Path.Combine(Origin(project), Path.GetFileName(entry));
+                                    if (Claimed(dst) || Exists(dst)) dst = Path.Combine(NewOrigin(project), Path.GetFileName(entry));
+                                }
+                                Claim(dst);
+                            }
                             Visit(entry, dst);
                         }, target);
                         Check(); Save(result.Files == 0 ? "未抢救到文件" : "完成", result.Files == 0 ? "没有抢救到完整可见文件；音频轨道、不可见视频轨道及不可读取内容未提取，请检查失败清单。" : result.Failed == 0 ? "可见文件读取完成；未做试播。" : "部分条目失败，见失败清单。");
@@ -104,16 +116,70 @@ namespace DiscArchive
             }
 
             private bool Conflict(string dst)
-            { return Exists(dst) || Reserved(Path.GetFileName(dst)) || Within(dst, attempt) || Within(attempt, dst); }
+            { return Claimed(dst) || Exists(dst) || Reserved(Path.GetFileName(dst)) || Within(dst, attempt) || Within(attempt, dst); }
 
             private string Origin(string project)
             {
                 string origin;
                 if (origins.TryGetValue(project, out origin)) return origin;
-                string stem = Path.Combine(project, "来源-" + disc); origin = stem; int suffix = 2;
-                while (Exists(origin) || Within(origin, attempt) || Within(attempt, origin)) origin = stem + "-" + suffix++;
-                Check(); Parents(origin); Directory.CreateDirectory(origin); origins.Add(project, origin);
+                origin = NewOrigin(project); origins.Add(project, origin); return origin;
+            }
+
+            private string NewOrigin(string project)
+            {
+                string stem = Path.Combine(project, "来源-" + disc); string origin = stem; int suffix = 2;
+                while (Claimed(origin) || Exists(origin) || Within(origin, attempt) || Within(attempt, origin)) origin = stem + "-" + suffix++;
+                Parents(origin); Claim(origin); Directory.CreateDirectory(origin);
                 return origin;
+            }
+
+            private static void ProjectName(string value)
+            {
+                if (String.Equals(value, Coordination, StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("项目名与并行抢救协调目录重名。");
+            }
+
+            // The share server enforces this handle, including across different computers.
+            // Never delete the lock file: deleting/recreating it could produce two lock identities.
+            // Keep this handle only during allocation, never during source reads or callbacks.
+            private FileStream AllocationLock()
+            {
+                Check();
+                string area = Path.Combine(target, Coordination); Parents(area); Directory.CreateDirectory(area);
+                string path = Path.Combine(area, "allocation.lock"); Parents(path);
+                while (true)
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+                    catch (IOException e)
+                    {
+                        int code = e.HResult & 65535;
+                        if (code != 32 && code != 33) throw;
+                        if (cancel.WaitHandle.WaitOne(50)) cancel.ThrowIfCancellationRequested();
+                        Check(false);
+                    }
+                }
+            }
+
+            private string ClaimPath(string path)
+            {
+                // Claims survive cancellation/crashes: an incomplete old tree must never acquire
+                // another disc's files. A retry gets a fresh origin instead of reclaiming it.
+                string key = Path.GetFullPath(path).Substring(target.Length).ToUpperInvariant();
+                // Use a relative key so different drive mappings of the same share agree.
+                byte[] digest;
+                using (SHA256 hash = SHA256.Create()) digest = hash.ComputeHash(Encoding.UTF8.GetBytes(key));
+                return Path.Combine(Path.Combine(target, Coordination), BitConverter.ToString(digest).Replace("-", "") + ".claim");
+            }
+            private bool Claimed(string path) { string claim = ClaimPath(path); Parents(claim); return Exists(claim); }
+            private void Claim(string path)
+            {
+                Parents(path); string claim = ClaimPath(path); Parents(claim);
+                using (FileStream file = new FileStream(claim, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                {
+                    byte[] bytes = Encoding.UTF8.GetBytes("DiscArchive path claim v1\r\n" + disc + "\r\n" + path);
+                    file.Write(bytes, 0, bytes.Length); file.Flush(true);
+                }
             }
 
             private bool SourceDirectory(string src)
@@ -127,21 +193,26 @@ namespace DiscArchive
                 Check(); Parents(src); Parents(project);
                 List<string> children = new List<string>();
                 Enumerate(src, delegate(string child) { children.Add(child); }, project);
-                bool collision = false;
-                foreach (string child in children) if (Conflict(Path.Combine(project, Path.GetFileName(child)))) { collision = true; break; }
-                string destination = collision ? Origin(project) : project;
-                // A root entry and a same-named child of the mapped project can both
-                // legitimately exist on the disc. Keep that whole mapped group together.
-                if (collision)
+                bool collision = false; string destination;
+                using (AllocationLock())
                 {
-                    bool sourceCollision = false;
-                    foreach (string child in children) if (Exists(Path.Combine(destination, Path.GetFileName(child)))) { sourceCollision = true; break; }
-                    if (sourceCollision)
+                    Parents(project); Directory.CreateDirectory(project);
+                    foreach (string child in children) if (Conflict(Path.Combine(project, Path.GetFileName(child)))) { collision = true; break; }
+                    destination = collision ? Origin(project) : project;
+                    // An origin may already contain another top-level entry from this disc.
+                    // Reserve the entire mapped group's children together before releasing the lock.
+                    if (collision)
                     {
-                        string stem = Path.Combine(destination, Path.GetFileName(src)); destination = stem; int suffix = 2;
-                        while (Exists(destination)) destination = stem + "-" + suffix++;
-                        Parents(destination); Directory.CreateDirectory(destination);
+                        bool sourceCollision = false;
+                        foreach (string child in children) if (Claimed(Path.Combine(destination, Path.GetFileName(child))) || Exists(Path.Combine(destination, Path.GetFileName(child)))) { sourceCollision = true; break; }
+                        if (sourceCollision)
+                        {
+                            string stem = Path.Combine(destination, Path.GetFileName(src)); destination = stem; int suffix = 2;
+                            while (Claimed(destination) || Exists(destination)) destination = stem + "-" + suffix++;
+                            Parents(destination); Claim(destination); Directory.CreateDirectory(destination);
+                        }
                     }
+                    foreach (string child in children) Claim(Path.Combine(destination, Path.GetFileName(child)));
                 }
                 paths.WriteLine("项目目录\t" + E(src) + "\t" + E(destination) + "\t" + (collision ? "同组子项整体隔离" : "源顶层项目目录对应目标项目根"));
                 foreach (string child in children) Visit(child, Path.Combine(destination, Path.GetFileName(child)));

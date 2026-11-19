@@ -124,6 +124,111 @@ public static class CatalogTests
             for (int i = 0; i < tasks.Length; i++) tasks[i] = Task.Factory.StartNew(delegate { catalog.Create(photo, target, "E:", "并行"); });
             Task.WaitAll(tasks);
             Assert(catalog.List().Count == 7, "concurrent creates preserve every record");
+            Catalog independent = new Catalog(Path.Combine(temp, "independent-state"));
+            Entry independentEntry = independent.Create(photo, target, "F:", "独立工位");
+            Assert(independentEntry.TargetId == first.TargetId && independent.List().Count == 1 && catalog.List().Count == 7,
+                "independent workstation keeps its own local catalog");
+            string clonedIdentity = File.ReadAllText(Path.Combine(sequence, "registry.id"));
+            Catalog[] clones = new Catalog[2];
+            Entry[] cloneEntries = new Entry[2];
+            Task[] cloneTasks = new Task[2];
+            for (int i = 0; i < clones.Length; i++)
+            {
+                string cloneState = Path.Combine(temp, "clone-" + i);
+                Directory.CreateDirectory(cloneState);
+                File.WriteAllText(Path.Combine(cloneState, "registry.id"), clonedIdentity);
+                File.WriteAllText(Path.Combine(cloneState, "sequence.txt"), "0");
+                clones[i] = new Catalog(cloneState);
+                int slot = i;
+                cloneTasks[i] = Task.Factory.StartNew(delegate { cloneEntries[slot] = clones[slot].Create(photo, target, "G:", "克隆序列"); });
+            }
+            Task.WaitAll(cloneTasks);
+            Assert(cloneEntries[0].Id != cloneEntries[1].Id && cloneEntries[0].Id != first.Id &&
+                SameBytes(sourceBytes, File.ReadAllBytes(first.OriginalPhoto)), "cloned sequence collisions advance without replacing another station archive");
+            Entry driveChange = catalog.List()[0];
+            driveChange.Drive = "Z:";
+            catalog.Save(driveChange);
+            System.Xml.XmlDocument movedDriveReplica = new System.Xml.XmlDocument();
+            movedDriveReplica.Load(Path.Combine(driveChange.JobDir, "entry.xml"));
+            Assert(catalog.List()[0].Drive == "Z:" && movedDriveReplica.SelectSingleNode("/ArrayOfEntry/Entry/Drive").InnerText == "Z:",
+                "same registered disc can move to another optical drive and update its own replica");
+            Entry wrongItem = catalog.List()[0];
+            wrongItem.Id = catalog.List()[1].Id;
+            bool wrongItemRejected = false;
+            try { catalog.Save(wrongItem); } catch (InvalidOperationException) { wrongItemRejected = true; }
+            Assert(wrongItemRejected, "changing drive does not permit saving into another registered disc");
+            string targetCsv = Path.Combine(temp, "target.csv");
+            string publishedReplica = Path.Combine(independentEntry.JobDir, "entry.xml");
+            System.Xml.XmlDocument shared = new System.Xml.XmlDocument();
+            shared.Load(publishedReplica);
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/Photo").InnerText = "C:\\another-machine\\private.jpg";
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/OriginalPhoto").InnerText = "C:\\another-machine\\private.jpg";
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/TargetRoot").InnerText = "Q:\\other-machine";
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/JobDir").InnerText = "Q:\\other-machine\\DiscArchive\\" + independentEntry.Id;
+            System.Xml.XmlElement reportNode = shared.CreateElement("Report");
+            reportNode.InnerText = "Q:\\other-machine\\DiscArchive\\" + independentEntry.Id + "\\抢救记录\\子目录";
+            shared.DocumentElement.FirstChild.AppendChild(reportNode);
+            System.Xml.XmlElement folders = shared.CreateElement("ArchiveFolders");
+            System.Xml.XmlElement folderNode = shared.CreateElement("string");
+            folderNode.InnerText = "项目共享"; folders.AppendChild(folderNode);
+            shared.DocumentElement.FirstChild.AppendChild(folders);
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/RegistrationId").ParentNode.RemoveChild(shared.SelectSingleNode("/ArrayOfEntry/Entry/RegistrationId"));
+            shared.Save(publishedReplica);
+            string pendingDir = Path.Combine(target, "DiscArchive", "DA-unpublished.pending-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(pendingDir);
+            File.WriteAllText(Path.Combine(pendingDir, "entry.xml"), "incomplete");
+            string relocated = target + "-current-access";
+            Directory.Move(target, relocated);
+            int targetCount = independent.ExportTarget(relocated, targetCsv);
+            string targetText = File.ReadAllText(targetCsv);
+            byte[] targetBytes = File.ReadAllBytes(targetCsv);
+            Assert(targetCount == 11 && targetBytes[0] == 239 && targetBytes[1] == 187 && targetBytes[2] == 191,
+                "target export includes all stations and legacy replica with UTF-8 BOM, excludes pending");
+            Assert(targetText.Contains(Path.Combine(relocated, "项目共享")) && targetText.Contains(Path.Combine(relocated, "DiscArchive", independentEntry.Id, "photo.jpg")) &&
+                targetText.Contains(Path.Combine(relocated, "DiscArchive", independentEntry.Id, "抢救记录", "子目录")) &&
+                !targetText.Contains("another-machine") && !targetText.Contains("other-machine") && targetText.Contains("\"F:\"") && targetText.Contains("' =HYPERLINK"),
+                "target export rebases actual directories and photos and protects shared CSV formula text");
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/TargetRoot").InnerText = "\\\\old-workstation\\old-share";
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/JobDir").InnerText = "\\\\old-workstation\\old-share\\DiscArchive\\" + independentEntry.Id;
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/Report").InnerText = "\\\\old-workstation\\old-share\\DiscArchive\\" + independentEntry.Id + "\\抢救记录\\子目录";
+            shared.Save(Path.Combine(relocated, "DiscArchive", independentEntry.Id, "entry.xml"));
+            Assert(independent.ExportTarget(relocated, targetCsv) == targetCount && File.ReadAllText(targetCsv) == targetText,
+                "stored UNC source paths rebase identically without consulting the old network share");
+            string brokenReplica = Path.Combine(relocated, "DiscArchive", cloneEntries[0].Id, "entry.xml");
+            string intactReplica = File.ReadAllText(brokenReplica);
+            File.WriteAllText(brokenReplica, "broken shared XML");
+            bool sharedRejected = false;
+            try { independent.ExportTarget(relocated, targetCsv); }
+            catch (IOException error) { sharedRejected = error.Message.Contains(cloneEntries[0].Id); }
+            Assert(sharedRejected && File.ReadAllText(targetCsv) == targetText, "corrupt published record fails visibly without replacing previous export");
+            File.WriteAllText(brokenReplica, intactReplica);
+            shared.SelectSingleNode("/ArrayOfEntry/Entry/ArchiveFolders/string").InnerText = "..\\outside";
+            shared.Save(Path.Combine(relocated, "DiscArchive", independentEntry.Id, "entry.xml"));
+            sharedRejected = false;
+            try { independent.ExportTarget(relocated, targetCsv); } catch (IOException) { sharedRejected = true; }
+            Assert(sharedRejected && File.ReadAllText(targetCsv) == targetText, "shared project paths cannot escape the selected target");
+            Directory.Move(relocated, target);
+            string legacyReplicaPath = Path.Combine(cloneEntries[0].JobDir, "entry.xml");
+            string legacyCatalogPath = Path.Combine(temp, "clone-0", "catalog.xml");
+            foreach (string legacyPath in new string[] { legacyReplicaPath, legacyCatalogPath })
+            {
+                System.Xml.XmlDocument oldRecord = new System.Xml.XmlDocument(); oldRecord.Load(legacyPath);
+                System.Xml.XmlNode registration = oldRecord.SelectSingleNode("/ArrayOfEntry/Entry/RegistrationId");
+                registration.ParentNode.RemoveChild(registration); oldRecord.Save(legacyPath);
+            }
+            Entry legacyDriveChange = clones[0].List()[0]; legacyDriveChange.Drive = "H:";
+            clones[0].Save(legacyDriveChange);
+            System.Xml.XmlDocument oldReplicaReadback = new System.Xml.XmlDocument(); oldReplicaReadback.Load(legacyReplicaPath);
+            Assert(clones[0].List()[0].Drive == "H:" && oldReplicaReadback.SelectSingleNode("/ArrayOfEntry/Entry/Drive").InnerText == "H:",
+                "legacy registered disc without RegistrationId can retry using another optical drive");
+            string otherReplica = Path.Combine(cloneEntries[1].JobDir, "entry.xml");
+            System.Xml.XmlDocument foreign = new System.Xml.XmlDocument(); foreign.Load(otherReplica);
+            foreign.SelectSingleNode("/ArrayOfEntry/Entry/RegistrationId").InnerText = Guid.NewGuid().ToString("N");
+            foreign.Save(otherReplica);
+            string foreignText = File.ReadAllText(otherReplica);
+            bool ownershipRejected = false;
+            try { clones[1].Save(cloneEntries[1]); } catch (IOException) { ownershipRejected = true; }
+            Assert(ownershipRejected && File.ReadAllText(otherReplica) == foreignText, "saving cannot overwrite a foreign registration replica");
             Entry invalid = catalog.List()[0];
             invalid.JobDir = temp;
             bool rejected = false;

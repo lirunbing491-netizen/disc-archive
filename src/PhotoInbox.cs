@@ -6,6 +6,7 @@ namespace DiscArchive
 {
     internal sealed partial class MainForm
     {
+        private DriveSlot inboxSlot;
         private void ToggleWatch()
         {
             if (watcher != null) { EndWatch(); return; }
@@ -17,6 +18,8 @@ namespace DiscArchive
         private void BeginWatch(string folder)
         {
             EndWatch();
+            if(!selectedSlot.Connected || Active) throw new IOException("请先选一台空闲光驱，用于接收该文件夹的新照片。");
+            inboxSlot=selectedSlot;
             watcher = new FileSystemWatcher(folder) {
                 IncludeSubdirectories = false, NotifyFilter = NotifyFilters.FileName, SynchronizingObject = this
             };
@@ -25,25 +28,30 @@ namespace DiscArchive
             watcher.Error += delegate(object sender, ErrorEventArgs e) { if (sender == watcher) PauseInbox("照片文件夹失去连接或一次收到太多文件。"); };
             watcher.EnableRaisingEvents = true;
             watchButton.Text = "停止接收新照片";
-            watchLabel.Text = "正在接收新照片：" + folder;
+            watchLabel.Text = "新照片固定分配到 "+inboxSlot.Drive+"　"+folder;
         }
         private void EndWatch()
         {
             if (watcher != null) { watcher.Dispose(); watcher = null; }
             nextPhoto = null;
+            inboxSlot=null;
             watchButton.Text = "自动接收照片…";
             watchLabel.Text = "照片来源：手动选择或拖入";
         }
         private void PauseInbox(string why)
         {
-            EndWatch(); station.BlockAutomatic();
+            DriveSlot slot=inboxSlot; EndWatch();
+            if(slot!=null) {
+                slot.Worker.BlockAutomatic();
+                if(slot.Worker.Current!=null && !slot.Worker.Busy) slot.Info="请核对 "+slot.Drive+" 的盘面，或停止后重新选图。";
+                RenderSlot(slot);
+            }
             watchLabel.Text = "自动接收已暂停。 " + why + " 请手动核对照片。";
-            if (Active && !station.Busy) info.Text = "请核对屏幕上的照片，或停止这张后重新选图。";
         }
         private void NewImage(string path)
         {
             if (watcher == null || !IsPhoto(path)) return;
-            if (Active) { PauseInbox("上一张盘尚未结束时收到了新照片。"); return; }
+            if (inboxSlot==null || inboxSlot.Worker.Current!=null || inboxSlot.Polling) { PauseInbox("绑定的光驱尚未结束时收到了新照片。"); return; }
             if (nextPhoto != null && !String.Equals(nextPhoto,path,StringComparison.OrdinalIgnoreCase))
             { PauseInbox("同时收到了多张照片。"); return; }
             nextPhoto = path;
@@ -66,7 +74,7 @@ namespace DiscArchive
             }
             catch (UnauthorizedAccessException ex) { PauseInbox(ex.Message); return; }
             nextPhoto = null;
-            try { Register(path); }
+            try { RegisterFor(inboxSlot,path,false); }
             catch (Exception ex) { PauseInbox(ex.Message); }
         }
     }

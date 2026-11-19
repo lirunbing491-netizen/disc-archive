@@ -6,9 +6,9 @@
 
 ## 下载与开始
 
-[下载 Windows 便携版](https://github.com/lirunbing491-netizen/disc-archive/releases/latest/download/DiscArchive-Windows.zip) · [查看发行说明](https://github.com/lirunbing491-netizen/disc-archive/releases/latest)
+[下载多光驱测试版 v0.2.0-beta.1](https://github.com/lirunbing491-netizen/disc-archive/releases/download/v0.2.0-beta.1/DiscArchive-MultiDrive-Windows.zip) · [单光驱正式版 v0.1.0](https://github.com/lirunbing491-netizen/disc-archive/releases/tag/v0.1.0)
 
-解压整个压缩包，打开其中的 `DiscArchive` 文件夹，双击 `导盘助手.exe`。请把同文件夹的配置文件、识字脚本和使用说明一起保留。
+解压整个压缩包，打开其中的 `DiscArchive-MultiDrive` 文件夹，双击 `导盘助手.exe`。如果正在使用旧版，等当前任务结束后，正常退出旧窗口再打开测试版。
 
 1. 在“导盘”页选择目标目录和光驱，“本张项目”可以留空，由工具按可用线索判断。
 2. 取出上一张盘，用“用摄像头拍盘面”拍照，或选择、拖入已有盘面照片。
@@ -16,6 +16,14 @@
 4. 查看本张结果和登记册，再换下一张。遇到“部分拷出”或“待复查”，查看失败清单。
 
 完整操作见[使用说明](使用说明.txt)。
+
+## 多光驱与多台电脑
+
+**同一台电脑**只需打开一个窗口。先选顶部的光驱，拍照，再把盘放入对应设备。第一台开始拷贝后，切到第二台拍下一张。摄像头页也能直接切换光驱。每台各自等待、读取、停止和显示结果；先挂载的光驱只会处理自己绑定的照片。接入新设备后点“刷新光驱”。自动接收的照片文件夹固定分配给启用时选中的光驱，切换顶部选择不会改变这项绑定。
+
+**多台电脑**各自运行测试版。各存各的硬盘时，每台独立导盘。需要写进同一个项目库时，各电脑在“新盘存到”选择同一 Windows/SMB 共享根目录，例如 `\\文件服务器\素材归档`。每台电脑都应有该目录的写入权限，并使用多光驱版。支持 Windows 文件锁的共享存储会协调同名输出；各家云盘的本地同步目录无法提供这种跨电脑协调。
+
+“登记册”可导出本机表，也可用“导出归档盘总表”汇总一个目标目录下各工位已登记的光盘。归档盘总表按当前访问路径列出素材位置。归档根目录内的 `.discarchive-coordination-v1` 用来保留输出归属，与 `DiscArchive` 登记目录一起保留。
 
 ## 归档与读取边界
 
@@ -47,13 +55,13 @@
 
 构建使用 Windows 自带的 .NET Framework C# 编译器和系统程序集，不需要安装额外收费依赖。保留应用清单及配置文件，供 Windows 兼容性设置和运行时使用；OCR 脚本与程序一起分发。
 
-便携程序输出到 `dist/DiscArchive/`；发行压缩包为 `dist/DiscArchive-Windows.zip`。压缩包仅包含 `DiscArchive/` 根文件夹下的五个文件：`导盘助手.exe`、`导盘助手.exe.config`、`LabelOcr.ps1`、`使用说明.txt`、`LICENSE`。构建不会自动上传或发布。
+便携程序输出到 `dist/DiscArchive-MultiDrive/`，发行包为 `dist/DiscArchive-MultiDrive-Windows.zip`。压缩包包含程序、配置、识字脚本、使用说明和许可证。
 
 测试脚本的自动检查不能代替真实光驱、坏盘和摄像头上的使用验收。
 
 ## 数据与备份
 
-目标硬盘的 `DiscArchive` 目录保存按盘号组织的登记与读取记录。本机登记册位于 `%LOCALAPPDATA%\DiscArchive\工作站\抢救版`。从旧版首次启动时，会复制可用的旧登记记录，新旧版之后各自保存；不要同时运行。备份前关闭程序，连同旧照片一起复制整个 `%LOCALAPPDATA%\DiscArchive\工作站` 目录，并单独备份目标硬盘上的素材和记录。
+目标硬盘的 `DiscArchive` 目录保存按盘号组织的登记与读取记录。本机测试版登记册位于 `%LOCALAPPDATA%\DiscArchive\工作站\多光驱版`，第一次启动会复制已有登记册，之后与 v0.1.0 各自保存。备份前关闭程序，连同旧照片一起复制整个 `%LOCALAPPDATA%\DiscArchive\工作站` 目录，并单独备份目标硬盘上的素材和记录。
 
 ## 许可证
 
