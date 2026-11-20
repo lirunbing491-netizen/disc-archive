@@ -89,14 +89,21 @@ namespace DiscArchive
     {
         private readonly object sync = new object();
         private readonly string root;
-        private SafeFileHandle handle;
+        private readonly bool raw;
+        private SafeFileHandle handle, counterHandle;
         private string identity;
+        private string rawMapping;
         private uint changeCount;
         private bool hasCount, locked, disposed, failed;
 
-        internal OpticalLease(string root)
+        internal OpticalLease(string root) : this(root, false) { }
+
+        // Only RawOptical may request this after a successful data-sector read.
+        // There need not be a Windows-readable filesystem on this medium.
+        internal OpticalLease(string root, bool raw)
         {
             this.root = root;
+            this.raw = raw;
             try
             {
                 using (new OpticalNative.ErrorMode())
@@ -104,21 +111,46 @@ namespace DiscArchive
                     if (OpticalNative.GetDriveType(root) != 5)
                         throw new IOException("来源必须是 Windows 识别的 CD/DVD 光驱。");
                     // Reject an empty drive before issuing any locking control.
-                    string before = OpticalNative.Identity(root);
+                    string before = raw ? OpticalNative.DeviceIdentity(root) : OpticalNative.Identity(root);
                     // FILE_READ_ATTRIBUTES needs no administrator privileges.
                     handle = OpticalNative.CreateFile("\\\\.\\" + root.Substring(0, 2),
                         0x80, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
                     if (handle.IsInvalid) throw OpticalNative.Error("无法打开光驱");
+                    if (!OpticalNative.Probe(handle)) throw new IOException("无法确认光驱连接。");
                     locked = OpticalNative.Lock(handle, true);
                     uint count;
                     int error;
                     hasCount = OpticalNative.Count(handle, out count, out error);
+                    if (!hasCount && OpticalNative.Unsupported(error))
+                    {
+                        // Some USB drives answer CHECK_VERIFY2 successfully without an
+                        // optional count. The read-access control can still return it.
+                        var read=OpticalNative.CreateFile(@"\\.\"+root.Substring(0,2),0x80000000u,7,IntPtr.Zero,3,0,IntPtr.Zero);
+                        if(!read.IsInvalid)
+                        {
+                            uint alternate; int altError;
+                            if(OpticalNative.ReadCount(read,out alternate,out altError))
+                            { counterHandle=read; count=alternate; hasCount=true; }
+                            else
+                            {
+                                read.Dispose();
+                                if(!OpticalNative.Unsupported(altError) && altError!=5) error=altError;
+                            }
+                        }
+                        else read.Dispose();
+                    }
                     changeCount = count;
                     // Unsupported controls may fall back to the caller-owned
                     // tray lock; real media/device errors must never fall back.
                     if (!hasCount && (!locked || !OpticalNative.Unsupported(error)))
                         throw new IOException("无法建立原盘保护；光驱未提供可用的换盘计数或锁盘保护。", new Win32Exception(error));
-                    identity = OpticalNative.Identity(root);
+                    identity = raw ? OpticalNative.DeviceIdentity(root) : OpticalNative.Identity(root);
+                    if (raw)
+                    {
+                        rawMapping = identity.Substring(0, identity.LastIndexOf('\n'));
+                        if (!String.Equals(identity, OpticalNative.DeviceIdentity(root, handle), StringComparison.Ordinal))
+                            throw new IOException("建立保护时光驱设备句柄发生变化。");
+                    }
                     if (!String.Equals(before, identity, StringComparison.Ordinal))
                         throw new IOException("建立保护时光盘发生变化，请重新开始。");
                     VerifyCore();
@@ -144,11 +176,14 @@ namespace DiscArchive
         private void VerifyCore()
         {
             if (OpticalNative.GetDriveType(root) != 5 ||
-                !String.Equals(identity, OpticalNative.Identity(root), StringComparison.Ordinal))
+                !OpticalNative.Probe(handle) ||
+                !(raw ? String.Equals(rawMapping, OpticalNative.DeviceMapping(root), StringComparison.Ordinal) :
+                    String.Equals(identity, OpticalNative.Identity(root), StringComparison.Ordinal)))
                 throw new IOException("光盘已移除、更换或光驱发生变化，任务已停止。");
             uint count;
             int error;
-            bool counted = OpticalNative.Count(handle, out count, out error);
+            bool counted = counterHandle!=null ? OpticalNative.ReadCount(counterHandle,out count,out error) :
+                OpticalNative.Count(handle, out count, out error);
             if (hasCount)
             {
                 if (!counted || count != changeCount)
@@ -174,7 +209,7 @@ namespace DiscArchive
                         using (new OpticalNative.ErrorMode())
                             if (locked && !handle.IsInvalid && !handle.IsClosed) OpticalNative.Lock(handle, false);
                     }
-                    finally { handle.Dispose(); }
+                    finally { handle.Dispose(); if(counterHandle!=null)counterHandle.Dispose(); }
                 }
             }
         }
@@ -274,20 +309,58 @@ namespace DiscArchive
             return target.ToString() + "\n" + serial.ToString("X8") + "\n" + fs + "\n" + label;
         }
 
+        internal static string DeviceIdentity(string root)
+        {
+            using (SafeFileHandle current = CreateFile("\\\\.\\" + root.Substring(0, 2),
+                0x80, 7, IntPtr.Zero, 3, 0, IntPtr.Zero))
+            {
+                return DeviceIdentity(root, current);
+            }
+        }
+
+        internal static string DeviceIdentity(string root, SafeFileHandle current)
+        {
+            string target = DeviceMapping(root);
+            byte[] data = new byte[12];
+            uint returned;
+            if (current.IsInvalid || !DeviceIoControl(current, GetDeviceNumber, null, 0,
+                data, 12, out returned, IntPtr.Zero) || returned < 12 || BitConverter.ToUInt32(data, 0) != 2)
+                throw Error("无法确认光驱设备身份");
+            return target + "\n" + Convert.ToBase64String(data);
+        }
+
+        internal static string DeviceMapping(string root)
+        {
+            StringBuilder target = new StringBuilder(4096);
+            if (QueryDosDevice(root.Substring(0, 2), target, target.Capacity) == 0)
+                throw Error("无法确认光驱设备映射");
+            return target.ToString();
+        }
+
         internal static bool Unsupported(int error)
         {
             return error == 0 || error == 1 || error == 50 || error == 87 || error == 120;
         }
 
         internal static bool Count(SafeFileHandle handle, out uint count, out int error)
+        { return CountFrom(handle,CheckVerify2,out count,out error); }
+
+        internal static bool ReadCount(SafeFileHandle handle,out uint count,out int error)
+        { return CountFrom(handle,0x002D4800u,out count,out error); } // IOCTL_STORAGE_CHECK_VERIFY, FILE_READ_ACCESS
+
+        private static bool CountFrom(SafeFileHandle handle,uint control,out uint count,out int error)
         {
             byte[] data = new byte[4];
             uint returned;
-            bool ok = DeviceIoControl(handle, CheckVerify2, null, 0, data, 4, out returned, IntPtr.Zero);
-            error = ok ? 0 : Marshal.GetLastWin32Error();
+            bool ok = DeviceIoControl(handle, control, null, 0, data, 4, out returned, IntPtr.Zero);
+            // Zero means this successful readiness request supplied no counter;
+            // nonzero truncated output is malformed. Neither is a valid count.
+            error = CounterError(ok,returned,ok?0:Marshal.GetLastWin32Error());
             count = ok && returned == 4 ? BitConverter.ToUInt32(data, 0) : 0;
             return ok && returned == 4;
         }
+        internal static int CounterError(bool success,uint returned,int nativeError)
+        { return success ? (returned==4 || returned==0 ? 0 : 13) : nativeError; }
 
         internal static bool Lock(SafeFileHandle handle, bool prevent)
         {

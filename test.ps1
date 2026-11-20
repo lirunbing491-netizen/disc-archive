@@ -17,20 +17,32 @@ if ($inputs.Count -eq 0) { throw 'Public src/*.cs is missing.' }
 $work = Join-Path ([IO.Path]::GetTempPath()) ('DiscArchive-PublicTests-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($work)
 Write-Output ('Generated test artifacts: ' + $work)
-Write-Output 'No physical media or camera capture is used. UI construction may enumerate cameras read-only. Model requests use loopback only.'
+Write-Output 'No physical media or camera capture is used. UI construction may enumerate cameras read-only. No external network requests. Model requests use loopback only. RawOptical --drive is never passed by this runner.'
 $count = 0
-foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical','Camera','CompletionNotice','VisionSettings','Endpoint','Workflow','MultiDrive')) {
+foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical','Camera','CompletionNotice','VisionSettings','Endpoint','Workflow','MultiDrive','Identity','Alias','Choice','ContinuationWorkflow','PauseRestart','ArchiveReader','ArchiveTree','HfsGuard','Layout','RawOptical','SourcePipeline','OpticalMount','TrackInfo','MountCleanup','CloseOutcome')) {
     $dir = Join-Path $work $name
     [void][IO.Directory]::CreateDirectory($dir)
     $exe = Join-Path $dir ($name + 'Tests.exe')
     $entry = $name + 'Tests'
     if ($name -in @('Workflow','MultiDrive')) { $entry = 'DiscArchive.' + $name + 'Tests' }
     $testSource = Join-Path $PSScriptRoot ('tests\' + $name + 'Tests.cs')
-    & $compiler /nologo /langversion:5 /codepage:65001 /target:exe /platform:anycpu "/main:$entry" "/out:$exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Xml.Linq.dll /r:System.Web.Extensions.dll /r:System.Security.dll $inputs $testSource
+    & $compiler /nologo /langversion:5 /codepage:65001 /target:exe /platform:anycpu "/win32manifest:$source\app.manifest" "/main:$entry" "/out:$exe" /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Xml.Linq.dll /r:System.Web.Extensions.dll /r:System.Security.dll $inputs $testSource
     if ($LASTEXITCODE -ne 0) { throw ($name + ' test compilation failed.') }
     Copy-Item -LiteralPath (Join-Path $source 'app.config') -Destination ($exe + '.config')
     Copy-Item -LiteralPath (Join-Path $source 'LabelOcr.ps1') -Destination $dir
+    # Copy both architectures into each isolated runner's actual default DLL layout.
+    foreach ($architecture in @('x64','x86')) {
+        $dllSource = Join-Path $PSScriptRoot ('vendor\7zip\' + $architecture + '\7z.dll')
+        if (-not (Test-Path -LiteralPath $dllSource -PathType Leaf)) { throw ('Missing official DLL: ' + $dllSource) }
+        $nativeDir = Join-Path $dir ('native\' + $architecture)
+        [void][IO.Directory]::CreateDirectory($nativeDir)
+        Copy-Item -LiteralPath $dllSource -Destination (Join-Path $nativeDir '7z.dll')
+    }
     $testArgs = @()
+    if ($name -eq 'ArchiveReader') {
+        $processArchitecture = if ([Environment]::Is64BitOperatingSystem) { 'x64' } else { 'x86' }
+        $testArgs += (Join-Path $dir ('native\' + $processArchitecture + '\7z.dll'))
+    }
     if ($EnumerateHardware -and $name -in @('Optical','Camera')) { $testArgs += '--enumerate-read-only' }
     if ($name -eq 'Workflow') {
         # Exercise the real OCR worker process boundary without depending on installed language packs.
@@ -38,7 +50,7 @@ foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical',
         $stub = 'param([string]$PhotoPath) [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false); [Console]::Write("ARCHIVE 2024")'
         [IO.File]::WriteAllText((Join-Path $dir 'LabelOcr.ps1'), $stub, (New-Object Text.UTF8Encoding($true)))
     }
-    Write-Output ('RUN ' + $name)
+    Write-Output ('RUN ' + $entry + ' [' + $exe + ']')
     & $exe @testArgs
     if ($LASTEXITCODE -ne 0) { throw ($name + ' tests failed. Generated artifacts: ' + $dir) }
     $count++

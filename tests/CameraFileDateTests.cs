@@ -9,7 +9,7 @@ internal static class CameraFileDateTests
 {
     private static string root;
     private static int passed;
-    private static readonly DateTime Expected = new DateTime(2016,4,9,20,53,53);
+    private static readonly DateTime Expected = new DateTime(2012,3,4,5,6,7);
     private static void Assert(bool value, string message) { if(!value) throw new Exception(message); }
     private static void P16(byte[] b,int o,int n,bool big) { b[o]=(byte)(big?n>>8:n); b[o+1]=(byte)(big?n:n>>8); }
     private static void P32(byte[] b,int o,uint n,bool big) { for(int i=0;i<4;i++) b[o+i]=(byte)(n>>(big?(3-i)*8:i*8)); }
@@ -22,7 +22,7 @@ internal static class CameraFileDateTests
         int count=(original?1:0)+(digitized?1:0); P16(b,offset+80,count,big);int index=offset+82;
         if(original) { Entry(b,index,0x9003,2,20,(uint)(offset+220),big); index+=12; }
         if(digitized) Entry(b,index,0x9004,2,20,(uint)(offset+240),big);
-        Text(b,offset+200,"2020:01:02 03:04:05\0");Text(b,offset+220,"2016:04:09 20:53:53\0");Text(b,offset+240,"2014:01:01 00:00:00\0"); return b;
+        Text(b,offset+200,"2020:01:02 03:04:05\0");Text(b,offset+220,"2012:03:04 05:06:07\0");Text(b,offset+240,"2014:01:01 00:00:00\0"); return b;
     }
     private static DateTime? Read(byte[] bytes,Action<string> evidence=null)
     { string path=Path.Combine(root,Guid.NewGuid().ToString("N")+".raw");File.WriteAllBytes(path,bytes);return CameraFileDate.Read(path,CancellationToken.None,evidence); }
@@ -43,8 +43,8 @@ internal static class CameraFileDateTests
             });
             Test("DateTimeOriginal wins over digitized and modified dates",delegate { Assert(Read(Tiff(32,false,true,true))==Expected,"capture precedence"); });
             Test("digitized and modified alone do not qualify as capture",delegate { Assert(!Read(Tiff(32,false,false,true)).HasValue,"no capture guess"); });
-            Test("raw date-like text is not capture evidence",delegate { byte[] b=Tiff(32,false,false,false);Text(b,300,"2016:04:09 20:53:53");Assert(!Read(b).HasValue,"no string scan"); });
-            Test("invalid calendar date rejected",delegate { byte[] b=Tiff(32,false,true,true);Text(b,252,"2016:02:31 20:53:53\0");Assert(!Read(b).HasValue,"invalid date"); });
+            Test("raw date-like text is not capture evidence",delegate { byte[] b=Tiff(32,false,false,false);Text(b,300,"2012:03:04 05:06:07");Assert(!Read(b).HasValue,"no string scan"); });
+            Test("invalid calendar date rejected",delegate { byte[] b=Tiff(32,false,true,true);Text(b,252,"2016:02:31 05:06:07\0");Assert(!Read(b).HasValue,"invalid date"); });
             Test("cyclic next IFD bounded",delegate { byte[] b=Tiff(32,false,false,false);P32(b,70,32,false);Assert(!Read(b).HasValue,"cycle"); });
             Test("invalid huge offset bounded",delegate { byte[] b=Tiff(32,false,true,true);P32(b,4,0xfffffff0,false);Assert(!Read(b).HasValue,"bad offset"); });
             Test("malformed IFD count bounded",delegate { byte[] b=Tiff(32,false,true,true);P16(b,32,65535,false);Assert(!Read(b).HasValue,"bad count"); });
@@ -54,8 +54,8 @@ internal static class CameraFileDateTests
             });
             Test("PhaseOne public 0x0112 timestamp fallback",delegate {
                 byte[] b=new byte[256];b[0]=b[1]=73;P16(b,2,42,false);P32(b,4,128,false);Text(b,8,"IIIICwaR");P32(b,16,24,false);P32(b,32,2,false);
-                P32(b,40,0x112,false);P32(b,44,4,false);P32(b,48,4,false);P32(b,52,1460235233,false);
-                P32(b,56,0x212,false);P32(b,60,4,false);P32(b,64,4,false);P32(b,68,1460235097,false);
+                P32(b,40,0x112,false);P32(b,44,4,false);P32(b,48,4,false);P32(b,52,1330837567,false);
+                P32(b,56,0x212,false);P32(b,60,4,false);P32(b,64,4,false);P32(b,68,1330837431,false);
                 List<string> evidence=new List<string>();Assert(Read(b,evidence.Add)==Expected && evidence[0].Contains("0x0112"),"PhaseOne capture");
                 P32(b,40,0x212,false);Assert(!Read(b).HasValue,"unknown PhaseOne date ignored");
             });

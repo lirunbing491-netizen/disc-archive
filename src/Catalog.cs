@@ -20,8 +20,13 @@ namespace DiscArchive
         public string OriginalPhoto;
         public string ProjectHint, DiscLabel, PhotoText, VisionNote, NamingReason, Report;
         public string[] ArchiveFolders;
+        public string CanonicalId, LatestRunId, IdentityEvidence, ExistingProject;
+        public string SourceFormat, SourceCoverage, CloseWarning;
+        public long ReusedFiles, ReusedBytes;
+        public bool PendingLabelSync;
         public long Failed, Warnings;
         public long Files, Bytes;
+        internal Entry ForAttempt() { return (Entry)MemberwiseClone(); }
     }
 
     public class Catalog
@@ -162,7 +167,32 @@ namespace DiscArchive
             e.Title = (title ?? "").Trim();
             e.Project = project ?? "";
             e.TitleState = e.Title.Length == 0 ? "待确认" : "已确认";
-            Save(e);
+            SaveLabels(e,true);
+        }
+        internal void SyncLabels(Entry e) { SaveLabels(e,false); }
+        private void SaveLabels(Entry e,bool edited)
+        {
+            using(Acquire(Path.Combine(stateDir,"catalog.lock")))
+            {
+                var rows=Read(); var local=rows.Find(x=>x.Id==e.Id && x.RegistrationId==e.RegistrationId && x.TargetId==e.TargetId);
+                if(local==null) throw new IOException("未找到本机的原盘登记。");
+                if(edited) {
+                    local.Title=e.Title; local.Project=e.Project; local.TitleState=e.TitleState;
+                    e.PendingLabelSync=local.PendingLabelSync=true; Write(rows);
+                }
+                if(!local.PendingLabelSync || !IsOriginalTarget(local)) return;
+                using(Acquire(Path.Combine(local.TargetRoot,".discarchive-target.lock"))) {
+                    var remote=ReadOrigin(local,local.Id);
+                    if(remote.RegistrationId!=local.RegistrationId || remote.Created!=local.Created ||
+                        (String.IsNullOrEmpty(local.RegistrationId) && remote.Photo!=local.Photo))
+                        throw new IOException("目标登记的身份已改变，不能同步标题。");
+                    // Another workstation may have completed the original since this local snapshot.
+                    // A title edit must not write an older status or report path back to its replica.
+                    remote.Title=local.Title; remote.Project=local.Project; remote.TitleState=local.TitleState; remote.PendingLabelSync=false;
+                    WriteReplicaTo(remote,local.JobDir,local);
+                }
+                e.PendingLabelSync=local.PendingLabelSync=false; Write(rows);
+            }
         }
 
         public bool IsOriginalTarget(Entry e)
@@ -177,10 +207,10 @@ namespace DiscArchive
         public void Export(string csvPath)
         {
             List<Entry> entries = List();
-            StringBuilder csv = new StringBuilder("盘号,标题,标题确认,项目,状态,备注,照片,原图,登记目录,目标硬盘,目标路径,目标标识,光驱,登记时间,完整文件数,完整字节数,失败条目,项目目录,卷标,盘面候选,命名依据,抢救记录,时间提示\r\n");
+            StringBuilder csv = new StringBuilder(CsvHeader);
             foreach (Entry e in entries)
             {
-                string[] values = { e.Id, e.Title, e.TitleState, e.Project, e.Status, e.Note, e.Photo, e.OriginalPhoto, e.JobDir, e.TargetName, e.TargetRoot, e.TargetId, e.Drive, e.Created, e.Files.ToString(CultureInfo.InvariantCulture), e.Bytes.ToString(CultureInfo.InvariantCulture),e.Failed.ToString(),String.Join(" / ",e.ArchiveFolders??new string[0]),e.DiscLabel,e.PhotoText,e.NamingReason,e.Report,e.Warnings.ToString(CultureInfo.InvariantCulture) };
+                string[] values = { e.Id, e.Title, e.TitleState, e.Project, e.Status, e.Note, e.Photo, e.OriginalPhoto, e.JobDir, e.TargetName, e.TargetRoot, e.TargetId, e.Drive, e.Created, e.Files.ToString(CultureInfo.InvariantCulture), e.Bytes.ToString(CultureInfo.InvariantCulture),e.Failed.ToString(),String.Join(" / ",e.ArchiveFolders??new string[0]),e.DiscLabel,e.PhotoText,e.NamingReason,e.Report,e.Warnings.ToString(CultureInfo.InvariantCulture), e.CanonicalId??e.Id,e.ReusedFiles.ToString(),e.LatestRunId??e.Id };
                 for (int i = 0; i < values.Length; i++) { if (i > 0) csv.Append(','); csv.Append(Csv(values[i])); }
                 csv.Append("\r\n");
             }
@@ -189,13 +219,15 @@ namespace DiscArchive
 
         // Each published per-disc replica is authoritative for target-wide discovery.
         // This deliberately creates no shared catalog and acquires no write lock.
+        private const string CsvHeader="盘号,标题,标题确认,项目,状态,备注,照片,原图,登记目录,目标硬盘,目标路径,目标标识,光驱,登记时间,完整文件数,完整字节数,失败条目,项目目录,卷标,盘面候选,命名依据,抢救记录,时间提示,原盘号,已核对沿用文件,最近复核登记\r\n";
+
         public int ExportTarget(string targetRoot, string csvPath)
         {
             if (String.IsNullOrWhiteSpace(targetRoot) || !Directory.Exists(targetRoot))
                 throw new DirectoryNotFoundException("目标目录不存在或未连接。");
             string root = Path.GetFullPath(targetRoot);
             string archive = Path.Combine(root, "DiscArchive");
-            StringBuilder csv = new StringBuilder("盘号,标题,标题确认,项目,状态,备注,照片,原图,登记目录,目标硬盘,目标路径,目标标识,光驱,登记时间,完整文件数,完整字节数,失败条目,项目目录,卷标,盘面候选,命名依据,抢救记录,时间提示\r\n");
+            StringBuilder csv = new StringBuilder(CsvHeader);
             int count = 0;
             bool archiveExists;
             try { archiveExists = (File.GetAttributes(archive) & FileAttributes.Directory) != 0;
@@ -238,7 +270,8 @@ namespace DiscArchive
                             TargetName(root), root, e.TargetId, e.Drive, e.Created,
                             e.Files.ToString(CultureInfo.InvariantCulture), e.Bytes.ToString(CultureInfo.InvariantCulture),
                             e.Failed.ToString(CultureInfo.InvariantCulture), String.Join(" / ", projects.ToArray()),
-                            e.DiscLabel, e.PhotoText, e.NamingReason, report, e.Warnings.ToString(CultureInfo.InvariantCulture) };
+                            e.DiscLabel, e.PhotoText, e.NamingReason, report, e.Warnings.ToString(CultureInfo.InvariantCulture),
+                            e.CanonicalId??e.Id,e.ReusedFiles.ToString(),e.LatestRunId??e.Id };
                         for (int i = 0; i < values.Length; i++) { if (i > 0) csv.Append(','); csv.Append(Csv(values[i])); }
                         csv.Append("\r\n");
                         count++;
@@ -268,6 +301,11 @@ namespace DiscArchive
         {
             if (String.IsNullOrEmpty(e.Report) || String.IsNullOrEmpty(e.JobDir)) return "";
             string prefix = e.JobDir.TrimEnd('\\', '/') + "\\";
+            if(!String.IsNullOrEmpty(e.LatestRunId) && e.LatestRunId!=e.Id)
+            {
+                currentDirectory=CurrentChild(Path.GetDirectoryName(currentDirectory),e.LatestRunId);
+                prefix=Path.Combine(e.TargetRoot,"DiscArchive",e.LatestRunId).TrimEnd('\\','/')+"\\";
+            }
             string stored = e.Report.Replace('/', '\\');
             if (!stored.StartsWith(prefix.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase)) return "";
             string result = currentDirectory;
@@ -275,7 +313,7 @@ namespace DiscArchive
             return result;
         }
 
-        private static void CheckNoLinks(string path)
+        internal static void CheckNoLinks(string path)
         {
             for (string current = path; !String.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
             {
@@ -398,15 +436,83 @@ namespace DiscArchive
             }
         }
 
-        private void WriteReplicaTo(Entry e, string directory)
+        internal static string DiscFolder(string targetRoot,string id)
         {
-            if (!IsOriginalTarget(e)) throw new IOException("目标硬盘已离线或不是原目标硬盘。");
+            return CurrentChild(Path.Combine(Path.GetFullPath(targetRoot),"DiscArchive"),id);
+        }
+
+        internal Entry ReadOrigin(Entry current,string originalId)
+        {
+            if(!IsOriginalTarget(current)) throw new IOException("无法确认原备份硬盘。");
+            string file=CurrentChild(DiscFolder(current.TargetRoot,originalId),"entry.xml");
+            List<Entry> rows=ReadFile(file);
+            if(rows==null || rows.Count!=1 || rows[0]==null || rows[0].Id!=originalId || rows[0].TargetId!=current.TargetId)
+                throw new IOException("所选旧盘的登记与当前归档位置不一致。");
+            return rows[0];
+        }
+        internal Entry LookupOriginal(string root,string id)
+        {
+            var access=new Entry { TargetRoot=root,TargetId=ReadMarker(Path.Combine(root,Marker)) };
+            var entry=ReadOrigin(access,id);
+            return String.IsNullOrEmpty(entry.CanonicalId) || entry.CanonicalId==entry.Id
+                ? entry : ReadOrigin(access,entry.CanonicalId);
+        }
+        internal static string OriginalPhotoAt(string targetRoot,Entry owner)
+        {
+            string directory=DiscFolder(targetRoot,owner.Id);
+            string[] photos=Directory.GetFiles(directory,"photo.*");
+            foreach(string p in photos) {
+                if(String.Equals(Path.GetFileName(owner.OriginalPhoto??owner.Photo),Path.GetFileName(p),StringComparison.OrdinalIgnoreCase)) {
+                    CheckNoLinks(p); return p;
+                }
+            }
+            throw new IOException("原盘面照片未能在所选备份盘的登记目录找到。可改为重新拍照登记。");
+        }
+
+        // Keep the new insertion/photo as history while recording the most recent
+        // successful reconciliation against the original disc number.
+        internal void CompleteOrigin(Entry run,Entry origin)
+        {
+            if(run.Id==origin.Id) return;
+            using(Acquire(Path.Combine(stateDir,"catalog.lock")))
+            using(Acquire(Path.Combine(run.TargetRoot,".discarchive-target.lock")))
+            {
+                Entry remote=ReadOrigin(run,origin.Id);
+                if(remote.RegistrationId!=origin.RegistrationId || remote.Created!=origin.Created)
+                    throw new IOException("原盘登记在续导期间改变，已保留本次回执。");
+                CopyOutcome(remote,run);
+                WriteReplicaTo(remote,DiscFolder(run.TargetRoot,origin.Id),run);
+                var records=Read();
+                var local=records.Find(x=>x.Id==origin.Id && x.TargetId==origin.TargetId &&
+                    x.RegistrationId==origin.RegistrationId && x.Created==origin.Created);
+                if(local!=null) { CopyOutcome(local,run); Write(records); }
+            }
+        }
+        private static void CopyOutcome(Entry dest,Entry run)
+        {
+            dest.Status=run.Status; dest.Files=run.Files; dest.Bytes=run.Bytes; dest.Failed=run.Failed;
+            dest.ReusedFiles=run.ReusedFiles; dest.ReusedBytes=run.ReusedBytes;
+            dest.SourceFormat=run.SourceFormat;dest.SourceCoverage=run.SourceCoverage;dest.CloseWarning=run.CloseWarning;
+            dest.LatestRunId=run.Id; dest.ArchiveFolders=run.ArchiveFolders;
+            if(dest.TitleState!="已确认") { dest.Project=run.Project; dest.Title=run.Project; }
+            dest.Note="最近一次核对登记 "+run.Id+"。"+run.Note;
+            string prefix=run.JobDir.TrimEnd('\\')+"\\";
+            if(!String.IsNullOrEmpty(run.Report) && run.Report.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))
+                dest.Report=Path.Combine(dest.TargetRoot,"DiscArchive",run.Id,run.Report.Substring(prefix.Length));
+        }
+
+        private void WriteReplicaTo(Entry e, string directory,Entry targetAccess=null)
+        {
+            if (!IsOriginalTarget(targetAccess??e)) throw new IOException("目标硬盘已离线或不是原目标硬盘。");
             Directory.CreateDirectory(directory);
             AtomicWrite(Path.Combine(directory, "entry.xml"), delegate(Stream stream) { Serializer.Serialize(stream, new List<Entry> { e }); });
             AtomicText(Path.Combine(directory, "登记信息.txt"),
                 "盘号：" + e.Id + "\r\n标题：" + e.Title + "\r\n标题确认：" + e.TitleState + "\r\n项目：" + e.Project + "\r\n状态：" + e.Status +
                 "\r\n目标硬盘：" + e.TargetName + "\r\n目标路径：" + e.TargetRoot + "\r\n原图：" + e.OriginalPhoto + "\r\n登记时间：" + e.Created +
                 "\r\n完整文件数：" + e.Files + "\r\n完整字节数：" + e.Bytes + "\r\n失败条目：" + e.Failed + (e.Warnings>0 ? "\r\n时间提示：" + e.Warnings : "") +
+                "\r\n原盘号："+(e.CanonicalId??e.Id)+"\r\n已核对沿用文件："+e.ReusedFiles+"\r\n最近复核登记："+e.LatestRunId+
+                (String.IsNullOrEmpty(e.SourceFormat)?"":"\r\n读取格式："+e.SourceFormat)+(String.IsNullOrEmpty(e.SourceCoverage)?"":"\r\n未覆盖范围："+e.SourceCoverage)+
+                (String.IsNullOrEmpty(e.CloseWarning)?"":"\r\n"+e.CloseWarning)+
                 "\r\n项目目录：" + String.Join(" / ",e.ArchiveFolders??new string[0]) + "\r\n卷标：" + e.DiscLabel +
                 "\r\n识图结果：" + e.VisionNote + "\r\n盘面候选：" + e.PhotoText + "\r\n命名依据：" + e.NamingReason + "\r\n抢救记录：" + e.Report + "\r\n备注：" + e.Note + "\r\n");
         }
@@ -475,7 +581,7 @@ namespace DiscArchive
             AtomicWrite(path, delegate(Stream stream) { byte[] bytes = Utf8.GetPreamble(); stream.Write(bytes, 0, bytes.Length); bytes = Utf8.GetBytes(text); stream.Write(bytes, 0, bytes.Length); });
         }
 
-        private static void AtomicWrite(string path, Action<Stream> write)
+        internal static void AtomicWrite(string path, Action<Stream> write)
         {
             string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try

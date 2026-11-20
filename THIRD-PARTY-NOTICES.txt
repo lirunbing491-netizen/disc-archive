@@ -1,0 +1,41 @@
+﻿7-Zip 26.06 (official, unmodified Windows x64 and x86 libraries)
+Copyright (C) 1999-2026 Igor Pavlov.
+
+This application uses parts of the 7-Zip program, licensed under GNU LGPL
+2.1 or later, with the additional unRAR restriction and BSD notices described
+in vendor/7zip/LICENSE-7zip.txt. 7-Zip home and source information:
+https://www.7-zip.org/
+
+Exact upstream release and complete corresponding source:
+https://github.com/ip7z/7zip/releases/tag/26.06
+https://github.com/ip7z/7zip/releases/download/26.06/7z2606-src.7z
+The original source archive is also included at:
+vendor/7zip/downloads/7z2606-src.7z
+SHA256: e0364d39e8208557d939472c9a12d02ed1c12f45ca402e3b408bcaa63b36dd93
+
+The full GNU LGPL 2.1 is included as vendor/7zip/COPYING-LGPL-2.1.txt.
+The original unRAR license is included as vendor/7zip/unRarLicense.txt.
+The unRAR sources may not be used to re-create the proprietary RAR compression
+algorithm. See the included original license notices for all terms.
+
+Replacement / modification:
+The 7-Zip DLL is loaded dynamically. In the portable distribution, users may
+replace native/x64/7z.dll or native/x86/7z.dll with their own compatible build,
+matching the process architecture and the upstream 7-Zip interface. In this
+source checkout, the original dependency is in vendor/7zip/x64/7z.dll or
+vendor/7zip/x86/7z.dll. Keep a backup and restart the application after replacing
+the distributed native DLL. No signature/hash enforcement prevents users
+from running a compatible modified library. Reverse engineering for debugging
+modifications to this LGPL library is permitted. This notice does not restrict
+the rights granted by the LGPL. The application's own license is separate.
+
+Build instructions and sources are in the exact source archive DOC/readme.txt;
+the Windows binaries can be built with Visual Studio and the supplied makefiles.
+The upstream binaries distributed here have not been modified.
+
+Redistribution checklist:
+Include this notice, vendor/7zip/LICENSE-7zip.txt,
+vendor/7zip/COPYING-LGPL-2.1.txt, vendor/7zip/unRarLicense.txt,
+and vendor/7zip/downloads/7z2606-src.7z in each binary distribution that includes
+7-Zip. Keep native/x64/7z.dll and native/x86/7z.dll as separate replaceable files.
+The 7-Zip CLI, GUI, and installer are not part of this portable distribution.

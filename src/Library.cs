@@ -14,7 +14,7 @@ namespace DiscArchive
         private readonly DataGridView grid = new DataGridView();
         private readonly PictureBox recordPhoto = Picture();
         private readonly Label note = LabelOf("",9);
-        private readonly Button saveTitle = ButtonOf("保存标题和项目"), openFiles = ButtonOf("打开归档"), retry = ButtonOf("用原盘号重读");
+        private readonly Button saveTitle = ButtonOf("保存标题和项目"), openFiles = ButtonOf("打开归档"), retry = ButtonOf("核对 / 续导原盘");
         private string editorId;
         private bool editing, filling;
 
@@ -60,9 +60,10 @@ namespace DiscArchive
                 Entry e=Selected(); if(e==null) return;
                 string evidence="卷标　"+(String.IsNullOrWhiteSpace(e.DiscLabel)?"未记录或为空":e.DiscLabel)+
                     "\r\n盘面候选　"+(String.IsNullOrWhiteSpace(e.PhotoText)?"无":e.PhotoText)+
-                    "\r\n识图方式及结果　"+(e.VisionNote??"旧记录未保存")+
+                    "\r\n读取格式　"+(e.SourceFormat??"旧记录未保存")+(String.IsNullOrEmpty(e.CloseWarning)?"":"\r\n"+e.CloseWarning)+"\r\n识图方式及结果　"+(e.VisionNote??"旧记录未保存")+
                     "\r\n\r\n命名依据\r\n"+(e.NamingReason??"旧记录未保存")+
-                    "\r\n\r\n实际项目目录\r\n"+String.Join("\r\n",e.ArchiveFolders??new string[0]);
+                    "\r\n\r\n实际项目目录\r\n"+String.Join("\r\n",e.ArchiveFolders??new string[0])+
+                    "\r\n原盘号　"+(e.CanonicalId??e.Id)+"\r\n已核对沿用　"+e.ReusedFiles+" 个\r\n识盘依据　"+(e.IdentityEvidence??"旧记录未保存");
                 Notice(evidence);
             };
             receipts.Click+=delegate { UserAction(delegate {
@@ -80,7 +81,7 @@ namespace DiscArchive
             openFiles.Click += delegate { UserAction(delegate {
                 Entry e = Selected(); if(e==null) return;
                 if(!station.Book.IsOriginalTarget(e)||!Directory.Exists(e.JobDir)) throw new IOException("请连接原归档硬盘并使用登记时的盘符："+e.TargetRoot);
-                if(LiveEntry(e.Id)==null) book.Save(e);
+                if(LiveEntry(e.Id)==null) book.SyncLabels(e);
                 if(e.ArchiveFolders==null || e.ArchiveFolders.Length==0) OpenDirectory(e.JobDir);
                 else if(e.ArchiveFolders.Length==1) OpenDirectory(ProjectPhoto.DirectoryFor(e.TargetRoot,e.ArchiveFolders[0]));
                 else {
@@ -97,13 +98,36 @@ namespace DiscArchive
             retry.Click += delegate { UserAction(delegate {
                 Entry e=Selected(); if (e==null || Active || LiveEntry(e.Id)!=null) return;
                 DriveSlot slot=selectedSlot;
-                if (!Confirm("请准备照片中这张原盘。确认使用 "+slot.Drive+" 和原盘号 "+e.Id+" 重新读取？")) return;
+                if (!Confirm("请准备照片中同一张原盘。使用 "+slot.Drive+" 核对已归档文件并只补缺失或损坏项？旧版无摘要记录需额外读取原盘。")) return;
                 if(slot.Worker.Current!=null || LiveEntry(e.Id)!=null) throw new IOException("这张盘或指定光驱已有任务。");
-                slot.Worker.Retry(e,slot.Drive);
-                tabs.SelectedIndex=0; ArmSlot(slot,e);
+                if(book.IsOriginalTarget(e)) slot.Worker.Retry(e,slot.Drive);
+                else {
+                    if(!book.IsOriginalTarget(new Entry{TargetRoot=target.Text,TargetId=e.TargetId}))
+                        throw new IOException("请先在导盘页选择这份登记原来的备份硬盘或共享目录。");
+                    slot.Worker.ResumeKnown(target.Text,e.Id,slot.Drive);
+                }
+                tabs.SelectedIndex=0; ArmSlot(slot,slot.Worker.Current);
             }); };
         }
         private Entry Selected() { return grid.CurrentRow == null ? null : grid.CurrentRow.Tag as Entry; }
+        private void ResumeNumber()
+        {
+            DriveSlot slot=selectedSlot;
+            if(!slot.Connected || slot.Worker.Current!=null || !Directory.Exists(target.Text))
+                throw new IOException("请先选择原备份位置和一台空闲光驱。");
+            using(var d=new Form{Text="用备份盘上的旧盘号续导",Font=Font,ClientSize=new Size(585,148),StartPosition=FormStartPosition.CenterParent,MinimizeBox=false,MaximizeBox=false})
+            {
+                var l=Table(-100);l.Padding=new Padding(10);Row(l,45);Row(l,34);Row(l,-100);
+                l.Controls.Add(LabelOf("输入旧盘号（DA- 开头），确认准备放入 "+slot.Drive+" 的是该盘。",10),0,0);
+                var id=new TextBox{Dock=DockStyle.Fill}; l.Controls.Add(id,0,1);
+                var ok=ButtonOf("核对并补缺");ok.DialogResult=DialogResult.OK;
+                var no=ButtonOf("取消");no.DialogResult=DialogResult.Cancel;
+                l.Controls.Add(Flow(ok,no),0,2);d.Controls.Add(l);d.AcceptButton=ok;d.CancelButton=no;
+                if(d.ShowDialog(this)!=DialogResult.OK || slot.Worker.Current!=null)return;
+                var e=slot.Worker.ResumeKnown(target.Text,id.Text.Trim().ToUpperInvariant(),slot.Drive);
+                tabs.SelectedIndex=0; ArmSlot(slot,e);
+            }
+        }
         private void Reload() { entries = station.Book.List(); FillGrid(); }
         private void FillGrid()
         {
@@ -136,7 +160,7 @@ namespace DiscArchive
             Entry e=Selected();
             bool same=e!=null && e.Id==editorId;
             bool canEdit=e!=null; editTitle.Enabled=editProject.Enabled=saveTitle.Enabled=openFiles.Enabled=canEdit;
-            retry.Enabled=canEdit && selectedSlot.Connected && !Active && LiveEntry(e.Id)==null && e.Status!=Workstation.Done && e.Status!="已校验";
+            retry.Enabled=canEdit && selectedSlot.Connected && !Active && LiveEntry(e.Id)==null;
             if(!same || !editing)
             {
                 filling=true;

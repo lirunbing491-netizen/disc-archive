@@ -1,4 +1,4 @@
-# 导盘助手 · DiscArchive
+# 导盘助手 · 光盘兼容测试版
 
 把旧光盘中仍可读取的文件，连同盘面照片和读取记录，整理到备份硬盘。适合逐张处理历史素材光盘，按项目归档并保留原目录结构。当前为公开试用版。
 
@@ -6,9 +6,11 @@
 
 ## 下载与开始
 
-[下载多光驱测试版 v0.2.0-beta.1](https://github.com/lirunbing491-netizen/disc-archive/releases/download/v0.2.0-beta.1/DiscArchive-MultiDrive-Windows.zip) · [单光驱正式版 v0.1.0](https://github.com/lirunbing491-netizen/disc-archive/releases/tag/v0.1.0)
+本版为 **v0.4.1-beta.1 Windows 光盘兼容测试版**：在 Windows 上归档普通数据光盘，也可读取部分 Windows 无法显示目录的 Mac 格式光盘。这是 Windows 程序，当前没有 macOS 版。
 
-解压整个压缩包，打开其中的 `DiscArchive-MultiDrive` 文件夹，双击 `导盘助手.exe`。如果正在使用旧版，等当前任务结束后，正常退出旧窗口再打开测试版。
+[下载光盘兼容测试版 ZIP](https://github.com/lirunbing491-netizen/disc-archive/releases/download/v0.4.1-beta.1/DiscArchive-Optical-Windows.zip)。需要稳定版时，请使用 [v0.1.0 单光驱稳定版（latest）](https://github.com/lirunbing491-netizen/disc-archive/releases/latest)。
+
+将 `DiscArchive-Optical-Windows.zip` 完整解压，打开 `DiscArchive-Optical` 文件夹，双击 `导盘助手.exe`。保留包内文件，包括 `native` 子目录中的只读 DLL，以及随包的许可证与对应版本的上游源码归档。如果正在使用旧版，等当前任务结束后，正常退出旧窗口再打开此版。
 
 1. 在“导盘”页选择目标目录和光驱，“本张项目”可以留空，由工具按可用线索判断。
 2. 取出上一张盘，用“用摄像头拍盘面”拍照，或选择、拖入已有盘面照片。
@@ -16,6 +18,35 @@
 4. 查看本张结果和登记册，再换下一张。遇到“部分拷出”或“待复查”，查看失败清单。
 
 完整操作见[使用说明](使用说明.txt)。
+
+## 这版更新了什么
+
+- 增加 Windows 无法挂载的部分 Mac 格式光盘读取，保留普通数据盘的自动读取流程。
+- 支持查重、跨日续导、项目别名和多个光驱；原目录与已有素材保持原位，具体操作见下文。
+- 修正读盘收尾对完成状态的影响：文件已成功写入时，释放读取组件或关闭光驱句柄遇到的异常单独记录为“读盘收尾提示”。读取失败、写入失败和已知未覆盖内容仍会影响本张结果。若下一张遇设备占用，可正常退出后重开工具。
+
+## 光盘能读扇区，但 Windows 没有显示目录
+
+先试“自动”。工具优先使用 Windows 可读的目录；挂载失败时，以只读方式打开光驱、识别分区，再按文件提取。可在登记前点“检测盘格式…”。整个流程使用用户态读取组件，无需为 Mac 光盘安装文件系统驱动。
+
+| 格式 | 本版覆盖与证据 |
+| --- | --- |
+| HFS+ | 已用真实 APM 分区 DVD 验证列目录、文件抽样提取和整盘登记流程；抽样原档与 JPEG 已与独立扇区读取结果逐文件核对 SHA-256。抽样核对不代表整盘所有文件均经独立校验。 |
+| HFSX、嵌入式 HFS+、多个 Mac 数据分区 | HFSX 读取和多个分区的隔离提取用生成卷测试，早期 HFS 外壳内的 HFS+ 定位通过布局测试。 |
+| ISO 9660、Joliet、UDF | 正常挂载走系统路径；原始视图已用 ISO/Joliet/UDF 1.02 混合镜像交叉验证长中文名、空目录与文件字节。原始 UDF 解析入口目前确认单一 type-1 分区映射。 |
+| 混合盘 | 同一张盘可显示 Mac、ISO 和 UDF 目录。可显式选读取视图，每次记录本次所见。 |
+| APFS | 实验性的可读卷入口，仅布局探测做过合成验证。加密卷、快照和不同实际 APFS 版本的提取尚未验收。 |
+| 传统 HFS、音频或特殊轨道、多会话 | 可报告已识别的格式或轨道线索。纯传统 HFS、CD 音轨、VCD/XA 特殊扇区和历史会话不在本版提取范围。 |
+
+Mac 资源叉等可见辅助流以旁存文件保存，路径对应关系记录在本盘日志。已识别的硬链接占位和无法读取的范围会留下明确的结果。HFS+ 日志不重放；选择视图的文件级提取并非整盘镜像。部分压缩文件按需使用单文件临时空间。
+
+格式依据见 [Apple TN1150](https://developer.apple.com/library/archive/technotes/tn/tn1150.html)、[7-Zip 官方支持列表](https://www.7-zip.org/)及[随版本固定的格式说明](vendor/7zip/FORMAT-NOTES.md)。
+
+## 查重、续导与项目名称
+
+- 插盘时用相对目录、长度和限量内容抽样查找当前备份位置中的候选盘。出现候选时由操作者确认，单凭同一卷标不会跳过拷贝。
+- 点“暂停本张”，之后可在另一台光驱或工位用原盘号继续。完整文件有持久 SHA-256 回执。续导核对目标，沿用正确文件，补齐缺失项，并保护内容已变的旧副本。中断文件从头读取。旧版无摘要的清单需要额外比对原盘与硬盘。
+- 格式等价的项目名可沿用已有位置。近似名称需明确选择，已确认的别名仅对当前备份根生效。历史目录和素材不会被自动搬动。
 
 ## 多光驱与多台电脑
 
@@ -55,14 +86,14 @@
 
 构建使用 Windows 自带的 .NET Framework C# 编译器和系统程序集，不需要安装额外收费依赖。保留应用清单及配置文件，供 Windows 兼容性设置和运行时使用；OCR 脚本与程序一起分发。
 
-便携程序输出到 `dist/DiscArchive-MultiDrive/`，发行包为 `dist/DiscArchive-MultiDrive-Windows.zip`。压缩包包含程序、配置、识字脚本、使用说明和许可证。
+便携程序输出到 `dist/DiscArchive-Optical/`，发行包为 `dist/DiscArchive-Optical-Windows.zip`。完整程序内置 x64/x86 只读 DLL、相关许可及对应版本的上游源码归档。
 
 测试脚本的自动检查不能代替真实光驱、坏盘和摄像头上的使用验收。
 
 ## 数据与备份
 
-目标硬盘的 `DiscArchive` 目录保存按盘号组织的登记与读取记录。本机测试版登记册位于 `%LOCALAPPDATA%\DiscArchive\工作站\多光驱版`，第一次启动会复制已有登记册，之后与 v0.1.0 各自保存。备份前关闭程序，连同旧照片一起复制整个 `%LOCALAPPDATA%\DiscArchive\工作站` 目录，并单独备份目标硬盘上的素材和记录。
+目标硬盘的 `DiscArchive` 目录保存按盘号组织的登记与续导回执，根目录的 `.discarchive-*` 保存协作和识别信息。本版登记册位于 `%LOCALAPPDATA%\DiscArchive\工作站\Mac光盘兼容试用版`，首次启动会复制已有登记，之后与之前版本各自保存。备份前关闭程序，连同旧照片一起复制整个 `%LOCALAPPDATA%\DiscArchive\工作站` 目录，并单独备份目标上的素材和记录。
 
 ## 许可证
 
-采用 [MIT License](LICENSE)。
+导盘助手自身代码采用 [MIT License](LICENSE)。随包的 7-Zip 26.06 动态库适用[上游许可与第三方声明](THIRD-PARTY-NOTICES.txt)。

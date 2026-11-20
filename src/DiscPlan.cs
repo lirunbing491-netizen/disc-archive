@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,14 +22,15 @@ namespace DiscArchive
         }
         private static readonly Regex DatePattern = new Regex(@"(?<!\d)(?:(?<y>19\d{2}|20\d{2})[-_.年 /]?(?<m>0?[1-9]|1[0-2])[-_.月 /]?(?<d>0?[1-9]|[12]\d|3[01])日?|(?<ys>\d{2})[-_.年 /](?<ms>0?[1-9]|1[0-2])[-_.月 /](?<ds>0?[1-9]|[12]\d|3[01])日?|(?<s>\d{6}))(?!\d)", RegexOptions.Compiled);
         private static readonly Regex Generic = new Regex(@"^(?:raw|jpg|jpeg|tif|tiff|psd|psb|capture\s*one|captureone|capture|output|selects|trash|session|sessions|images?|photos?|dcim|backup|new\s*folder|untitled|disc|dvd(?:[\s-]*r[wm]?)?|cd(?:[\s-]*r[wm]?)?|data|img|dsc|test|素材|照片|图片|新建文件夹|原片|成片|备份|导出|拍摄|测试|未命名|光盘|新卷|无标题)(?:[\s_\-\d]*)$",RegexOptions.IgnoreCase);
-        public static DiscPlan Decide(string root,string volumeLabel,string photoText,string userProject,string discId,DateTime importDay,CancellationToken cancel)
+        public static DiscPlan Decide(string root,string volumeLabel,string photoText,string userProject,string discId,DateTime importDay,CancellationToken cancel,DiscSource media = null)
         {
+            media = media ?? DiscSource.Windows;
             cancel.ThrowIfCancellationRequested();
             DiscPlan p = new DiscPlan(); List<string> reasons = new List<string>();
             string id = Safe(String.IsNullOrWhiteSpace(discId) ? "无盘号" : discId);
             Hint user = Parse(userProject,"用户显式项目",true), volume = Parse(volumeLabel,"卷标",false), photo = Parse(photoText,"盘面文字",false);
             List<KeyValuePair<string,Hint>> top = new List<KeyValuePair<string,Hint>>();
-            try { foreach(string d in Directory.EnumerateDirectories(root).Take(129)) { cancel.ThrowIfCancellationRequested(); if(top.Count==128) { reasons.Add("顶层目录仅检查前128项"); break; } top.Add(new KeyValuePair<string,Hint>(Path.GetFileName(d),Parse(Path.GetFileName(d),"顶层目录",false))); } }
+            try { foreach(string d in Directories(media,root).Take(129)) { cancel.ThrowIfCancellationRequested(); if(top.Count==128) { reasons.Add("顶层目录仅检查前128项"); break; } top.Add(new KeyValuePair<string,Hint>(Path.GetFileName(d),Parse(Path.GetFileName(d),"顶层目录",false))); } }
             catch(OperationCanceledException) { throw; } catch { reasons.Add("部分顶层目录不可读"); }
             List<KeyValuePair<string,Hint>> strong = top.Where(x=>x.Value.Day.HasValue && x.Value.Name!=null).ToList();
             var projects = strong.Select(x=>x.Value.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -57,7 +58,7 @@ namespace DiscArchive
             if(chosen==volume && name!=null) reasons.Add("采用卷标可读项目线索，未核实客户身份");
             if(day.HasValue) reasons.Add("日期来自明确文字："+(user.Day.HasValue?user.Source:volume.Day.HasValue?volume.Source:strong.Count>0?"顶层目录":photo.Source));
             if(volume.Name!=null && photo.Name!=null && !String.Equals(volume.Name,photo.Name,StringComparison.OrdinalIgnoreCase)) reasons.Add("卷标与盘面文字不一致，优先卷标");
-            Evidence ev = (!day.HasValue || name==null) ? ReadEvidence(root,cancel,!day.HasValue) : null;
+            Evidence ev = (!day.HasValue || name==null) ? ReadEvidence(root,cancel,!day.HasValue,media) : null;
             if(name==null && ev!=null)
             {
                 var namedDirs=top.Where(x=>Parse(x.Key,"卷标",false).Name!=null).Select(x=>x.Key).ToArray();
@@ -151,16 +152,38 @@ namespace DiscArchive
         private static DateTime Representative(List<DateTime> dates) { return dates.GroupBy(x=>x.Date).OrderByDescending(x=>x.Count()).ThenBy(x=>x.Key).First().Key; }
         private static string Distribution(List<DateTime> dates) { return String.Join("、",dates.GroupBy(x=>x.Date).OrderBy(x=>x.Key).Take(8).Select(x=>x.Key.ToString("yyyy-MM-dd")+"×"+x.Count())); }
         private static bool ValidDate(DateTime date) { return date.Year>=1981 && date.Date<=DateTime.Today.AddDays(2); }
-        private static Evidence ReadEvidence(string root,CancellationToken cancel,bool readHeads)
+        private static Evidence ReadEvidence(string root,CancellationToken cancel,bool readHeads,DiscSource media)
         {
             Evidence e=new Evidence(); Queue<string> dirs=new Queue<string>(); dirs.Enqueue(root);
             while(dirs.Count>0 && e.Dirs<64 && e.Files.Count<256)
             {
                 cancel.ThrowIfCancellationRequested(); string dir=dirs.Dequeue(); e.Dirs++;
                 int local=0;
-                try { foreach(string f in Directory.EnumerateFiles(dir)) { cancel.ThrowIfCancellationRequested(); if(e.Files.Count>=256 || local>=32) { e.Limited=true; break; } local++; try { FileInfo info=new FileInfo(f); e.Files.Add(new Sample { Path=f,Modified=info.LastWriteTime }); } catch { e.Errors++; } } }
+                try
+                {
+                    foreach(string entry in media.Entries(dir))
+                    {
+                        cancel.ThrowIfCancellationRequested();
+                        try
+                        {
+                            FileAttributes attributes=media.Attributes(entry);
+                            if((attributes&FileAttributes.ReparsePoint)!=0) { e.Errors++; continue; }
+                            if((attributes&FileAttributes.Directory)!=0)
+                            {
+                                if(Regex.IsMatch(Path.GetFileName(entry),@"^(Cache|Thumbnails|Proxies|Settings\d*)$",RegexOptions.IgnoreCase)) {e.CacheDirs++;continue;}
+                                if(dirs.Count+e.Dirs>=64) { e.Limited=true; continue; }
+                                dirs.Enqueue(entry);
+                            }
+                            else
+                            {
+                                if(e.Files.Count>=256 || local>=32) { e.Limited=true; continue; }
+                                local++; e.Files.Add(new Sample { Path=entry,Modified=media.Modified(entry) });
+                            }
+                        }
+                        catch(OperationCanceledException){throw;} catch {e.Errors++;}
+                    }
+                }
                 catch(OperationCanceledException){throw;} catch {e.Errors++;}
-                try { foreach(string d in Directory.EnumerateDirectories(dir)) { if(dirs.Count+e.Dirs>=64) {e.Limited=true;break;} try { if(Regex.IsMatch(Path.GetFileName(d),@"^(Cache|Thumbnails|Proxies|Settings\d*)$",RegexOptions.IgnoreCase)) {e.CacheDirs++;continue;} if((File.GetAttributes(d)&FileAttributes.ReparsePoint)==0)dirs.Enqueue(d); }catch{e.Errors++;} } }catch{e.Errors++;}
             }
             if(dirs.Count>0)e.Limited=true;
             List<Sample> images=Spread(e.Files.Where(x=>IsImage(x.Path)).ToList());
@@ -172,7 +195,7 @@ namespace DiscArchive
                 e.Heads++;
                 try {
                     DateTime? digitized;
-                    DateTime? date=CameraFileDate.Read(f.Path,cancel,out digitized);
+                    DateTime? date=CameraFileDate.Read(f.Path,cancel,out digitized,media);
                     if(date.HasValue && ValidDate(date.Value)) (IsRaw(f.Path)?e.Raw:e.Exif).Add(date.Value);
                     else if(digitized.HasValue && ValidDate(digitized.Value)) (IsRaw(f.Path)?e.RawDigitized:e.ExifDigitized).Add(digitized.Value);
                 } catch(OperationCanceledException){throw;}catch{e.Errors++;}
@@ -182,6 +205,8 @@ namespace DiscArchive
             foreach(Sample f in e.Files.Where(x=>IsImage(x.Path)||OtherMaterial(x.Path))) { Match m=DatePattern.Match(Path.GetFileNameWithoutExtension(f.Path)); if(m.Success) {DateTime? d=MatchDate(m);if(d.HasValue&&ValidDate(d.Value))e.Names.Add(d.Value);} }
             return e;
         }
+        private static IEnumerable<string> Directories(DiscSource media,string root)
+        { foreach(string path in media.Entries(root)) if((media.Attributes(path)&FileAttributes.Directory)!=0) yield return path; }
         private static List<Sample> Spread(List<Sample> files)
         {
             List<Sample> result=new List<Sample>();

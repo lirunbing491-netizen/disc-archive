@@ -23,6 +23,10 @@ internal static class RescueTests
     private static void Put(string rel, string content) { string path = Path.Combine(source, rel); Directory.CreateDirectory(Path.GetDirectoryName(path)); File.WriteAllText(path, content); }
     private static RescueResult Run(IDictionary<string, string> map = null, Action<string> progress = null, Action verify = null, CancellationToken token = default(CancellationToken))
     { return RescueCopy.Run(source, target, "项目", map, "盘-001", attempt, progress, verify, token); }
+    private static RescueResult Resume(Action<string> progress = null, string folder = null, CancellationToken token = default(CancellationToken), IDictionary<string,string> map = null)
+    { return RescueCopy.Run(source,target,folder ?? "项目",map,"盘-001",attempt,progress,null,token,attempt); }
+    private static string Esc(string s) { return s.Replace("\\","\\\\").Replace("\t","\\t").Replace("\r","\\r").Replace("\n","\\n"); }
+    private static string SharedText(string path) { using(FileStream stream=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)) using(StreamReader reader=new StreamReader(stream)) return reader.ReadToEnd(); }
     private static bool Throws<T>(Action action) where T : Exception { try { action(); return false; } catch (T) { return true; } }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
@@ -47,7 +51,7 @@ internal static class RescueTests
                 Stopwatch timer = Stopwatch.StartNew();
                 while (!File.Exists(args[4] + ".go")) { if(timer.ElapsedMilliseconds > 15000) throw new IOException("barrier timeout"); Thread.Sleep(20); }
                 if(args[6] == "cancel") c.Cancel();
-            }, null, c.Token);
+            }, null, c.Token, args.Length > 7 ? args[7] : null);
             Console.WriteLine("files=" + r.Files + ";failed=" + r.Failed); return r.Failed == 0 ? 0 : 2;
         }
         catch(RescueCanceledException) { return args[6] == "cancel" ? 0 : 3; }
@@ -122,12 +126,12 @@ internal static class RescueTests
                 byte[] data=new byte[76]; data[0]=data[1]=73; data[2]=42; data[4]=8;
                 data[8]=1; data[10]=0x69; data[11]=0x87; data[12]=4; data[14]=1; data[18]=26;
                 data[26]=1; data[28]=3; data[29]=0x90; data[30]=2; data[32]=20; data[36]=44;
-                byte[] date=Encoding.ASCII.GetBytes("2016:04:09 20:53:53\0"); Buffer.BlockCopy(date,0,data,44,date.Length);
+                byte[] date=Encoding.ASCII.GetBytes("2012:03:04 05:06:07\0"); Buffer.BlockCopy(date,0,data,44,date.Length);
                 File.WriteAllBytes(Path.Combine(source,"capture.tif"),data); RescueResult r=Run();
                 byte[] copied=File.ReadAllBytes(Path.Combine(target,"项目\\capture.tif"));
                 Assert(r.Files==1 && copied.Length==data.Length,"metadata file size");
                 for(int i=0;i<data.Length;i++) Assert(copied[i]==data[i],"EXIF file byte "+i);
-                Assert(Encoding.ASCII.GetString(copied,44,19)=="2016:04:09 20:53:53","embedded capture date unchanged");
+                Assert(Encoding.ASCII.GetString(copied,44,19)=="2012:03:04 05:06:07","embedded capture date unchanged");
             });
             Test("large fast file verification throttled instead of every megabyte", delegate {
                 File.WriteAllBytes(Path.Combine(source,"large.bin"),new byte[64*1024*1024]); int checks=0;
@@ -232,27 +236,27 @@ internal static class RescueTests
                 string[] origins = Directory.GetDirectories(Path.Combine(target,"项目"), "来源-*"); Assert(origins.Length == 1, "one origin"); Assert(File.Exists(Path.Combine(origins[0], "same\\deep\\b.txt")), "whole subtree");
             });
             Test("multiple conflicting top entries share one disc source folder", delegate {
-                Put("a.txt","new-a"); Put("b.txt","new-b"); Put("12-2\\13\\jpg\\image.jpg","image");
-                Directory.CreateDirectory(Path.Combine(target,"项目\\12-2")); File.WriteAllText(Path.Combine(target,"项目\\a.txt"),"old-a"); File.WriteAllText(Path.Combine(target,"项目\\b.txt"),"old-b");
+                Put("a.txt","new-a"); Put("b.txt","new-b"); Put("27-4\\29\\jpg\\image.jpg","image");
+                Directory.CreateDirectory(Path.Combine(target,"项目\\27-4")); File.WriteAllText(Path.Combine(target,"项目\\a.txt"),"old-a"); File.WriteAllText(Path.Combine(target,"项目\\b.txt"),"old-b");
                 RescueResult r=Run(); string origin=Path.Combine(target,"项目\\来源-盘-001");
                 Assert(r.Files==3 && Directory.GetDirectories(Path.Combine(target,"项目"),"来源-*").Length==1,"one shared origin");
                 Assert(File.ReadAllText(Path.Combine(origin,"a.txt"))=="new-a" && File.ReadAllText(Path.Combine(origin,"b.txt"))=="new-b","root conflicts grouped");
-                Assert(File.Exists(Path.Combine(origin,"12-2\\13\\jpg\\image.jpg")),"single-project hierarchy not flattened");
+                Assert(File.Exists(Path.Combine(origin,"27-4\\29\\jpg\\image.jpg")),"single-project hierarchy not flattened");
                 Run(); Assert(Directory.Exists(Path.Combine(target,"项目\\来源-盘-001-2")),"retry independent origin");
             });
             Test("two explicitly mapped project directories become project roots", delegate {
-                Put("170621-星河工作室\\12-2\\13\\jpg\\图.jpg","p"); Put("另一项目\\附件\\说明.txt","q");
-                RescueResult r=Run(new Dictionary<string,string> {{"170621-星河工作室","170621-星河工作室"},{"另一项目","另一项目"}});
-                Assert(r.Files==2 && File.Exists(Path.Combine(target,"170621-星河工作室\\12-2\\13\\jpg\\图.jpg")),"first project root");
+                Put("130708-星河工作室\\27-4\\29\\jpg\\图.jpg","p"); Put("另一项目\\附件\\说明.txt","q");
+                RescueResult r=Run(new Dictionary<string,string> {{"130708-星河工作室","130708-星河工作室"},{"另一项目","另一项目"}});
+                Assert(r.Files==2 && File.Exists(Path.Combine(target,"130708-星河工作室\\27-4\\29\\jpg\\图.jpg")),"first project root");
                 Assert(File.Exists(Path.Combine(target,"另一项目\\附件\\说明.txt")),"second project root");
-                Assert(!Directory.Exists(Path.Combine(target,"170621-星河工作室\\170621-星河工作室")),"no repeated project directory");
+                Assert(!Directory.Exists(Path.Combine(target,"130708-星河工作室\\130708-星河工作室")),"no repeated project directory");
             });
             Test("mapped project conflict isolates all child siblings as one group", delegate {
-                Put("项目甲\\12-2\\13\\jpg\\图.jpg","new"); Put("项目甲\\附档.txt","sidecar");
-                Directory.CreateDirectory(Path.Combine(target,"项目甲\\12-2")); File.WriteAllText(Path.Combine(target,"项目甲\\12-2\\old.txt"),"old");
+                Put("项目甲\\27-4\\29\\jpg\\图.jpg","new"); Put("项目甲\\附档.txt","sidecar");
+                Directory.CreateDirectory(Path.Combine(target,"项目甲\\27-4")); File.WriteAllText(Path.Combine(target,"项目甲\\27-4\\old.txt"),"old");
                 RescueResult r=Run(new Dictionary<string,string>{{"项目甲","项目甲"}}); string origin=Path.Combine(target,"项目甲\\来源-盘-001");
-                Assert(r.Files==2 && File.Exists(Path.Combine(origin,"12-2\\13\\jpg\\图.jpg")) && File.Exists(Path.Combine(origin,"附档.txt")),"complete group");
-                Assert(!File.Exists(Path.Combine(target,"项目甲\\附档.txt")) && File.ReadAllText(Path.Combine(target,"项目甲\\12-2\\old.txt"))=="old","no split or overwrite");
+                Assert(r.Files==2 && File.Exists(Path.Combine(origin,"27-4\\29\\jpg\\图.jpg")) && File.Exists(Path.Combine(origin,"附档.txt")),"complete group");
+                Assert(!File.Exists(Path.Combine(target,"项目甲\\附档.txt")) && File.ReadAllText(Path.Combine(target,"项目甲\\27-4\\old.txt"))=="old","no split or overwrite");
             });
             Test("mapped reserved photo group cannot collide with archive original", delegate {
                 Put("项目甲\\盘面照片\\photo.jpg","source"); Put("项目甲\\附档.txt","meta");
@@ -365,6 +369,166 @@ internal static class RescueTests
                     catch(RescueCanceledException e) { Assert(e.Result.Files==0 && e.Result.Failed==0,"canceled allocation receipt"); }
                 }
                 c.Dispose(); Run(); Payloads(Path.Combine(target,"项目"),"a");
+            });
+
+            Test("continuation reuses verified files with source content locked and keeps original routes", delegate {
+                Put("tree\\nested\\a.txt","alpha"); Put("tree\\b.txt","beta");
+                RescueResult first=Resume(); Assert(first.Files==2 && first.ReusedFiles==0,"first transfer");
+                using(FileStream locked=new FileStream(Path.Combine(source,"tree\\nested\\a.txt"),FileMode.Open,FileAccess.Read,FileShare.None))
+                {
+                    RescueResult second=Resume(null,"改名项目"); Assert(second.Files==2 && second.ReusedFiles==2 && second.ReusedBytes==9,"hash reuse avoids source reads");
+                    Assert(!Directory.Exists(Path.Combine(target,"改名项目")),"original route preferred");
+                }
+                Assert(Resume().ReusedFiles==2 && Directory.GetDirectories(Path.Combine(target,"项目"),"来源-*").Length==0,"repeated retry adds no nesting");
+            });
+            Test("continuation detects same size tampering preserves old and reuses repair", delegate {
+                Put("dir\\a","good"); Resume(); string original=Path.Combine(target,"项目\\dir\\a"); File.WriteAllText(original,"evil",new UTF8Encoding(false));
+                RescueResult repaired=Resume(); Assert(repaired.Files==1 && repaired.ReusedFiles==0 && File.ReadAllText(original)=="evil","tampered old preserved");
+                Assert(File.ReadAllText(original+".重新抢救")=="good","repair beside original");
+                Assert(Resume().ReusedFiles==1 && Directory.GetFiles(Path.GetDirectoryName(original)).Length==2,"repair route durable");
+            });
+            Test("continuation missing file recopies without duplicating parent", delegate {
+                Put("dir\\a","good"); Resume(); File.Delete(Path.Combine(target,"项目\\dir\\a")); RescueResult r=Resume();
+                Assert(r.ReusedFiles==0 && File.ReadAllText(Path.Combine(target,"项目\\dir\\a"))=="good","missing recopied in place");
+            });
+            Test("continuation cancellation then source root move preserves directories and counters", delegate {
+                Put("tree\\a","first"); Put("tree\\b","second"); CancellationTokenSource c=new CancellationTokenSource();
+                try { Resume(delegate(string m) { if(File.Exists(Path.Combine(target,"项目\\tree\\a"))) c.Cancel(); },null,c.Token); throw new Exception("cancel ignored"); }
+                catch(RescueCanceledException e) { Assert(e.Result.Files==1,"one durable publication"); }
+                string changed=source+"-other-drive"; Directory.Move(source,changed); source=changed;
+                RescueResult r=Resume(); Assert(r.Files==2 && r.ReusedFiles==1 && File.Exists(Path.Combine(target,"项目\\tree\\b")),"relative source survives root change");
+                Assert(Directory.GetDirectories(Path.Combine(target,"项目")).Length==1,"no repeated directory wrapper");
+                c.Dispose();
+            });
+            Test("continuation interrupted file restarts from zero and retains residual", delegate {
+                File.WriteAllBytes(Path.Combine(source,"large"),new byte[3*1024*1024]); CancellationTokenSource c=new CancellationTokenSource();
+                try { RescueCopy.Run(source,target,"项目",null,"1",attempt,null,delegate { if(Directory.Exists(attempt)) foreach(string p in Directory.GetFiles(attempt,"*.partial",SearchOption.AllDirectories)) if(new FileInfo(p).Length>0) c.Cancel(); },c.Token,attempt); throw new Exception("cancel ignored"); }
+                catch(RescueCanceledException e) { Assert(e.Result.Files==0,"partial excluded"); }
+                RescueResult r=Resume(); Assert(r.Files==1 && r.ReusedFiles==0 && new FileInfo(Path.Combine(target,"项目\\large")).Length==3*1024*1024,"full restart");
+                Assert(Directory.GetFiles(attempt,"*.partial",SearchOption.AllDirectories).Length==1,"old fragment retained"); c.Dispose();
+            });
+            Test("continuation bad source stays isolated and next retry fills original directory", delegate {
+                Put("dir\\bad","bad"); Put("dir\\good","good");
+                using(FileStream locked=new FileStream(Path.Combine(source,"dir\\bad"),FileMode.Open,FileAccess.Read,FileShare.None))
+                { RescueResult r=Resume(); Assert(r.Files==1 && r.Failed==1,"source isolated"); }
+                RescueResult retry=Resume(); Assert(retry.Files==2 && retry.ReusedFiles==1 && retry.Failed==0 && File.Exists(Path.Combine(target,"项目\\dir\\bad")),"retry fills original");
+            });
+            Test("continuation mapped groups retain routes and include later children", delegate {
+                Put("项目甲\\a","a"); Dictionary<string,string> map=new Dictionary<string,string>{{"项目甲","项目甲"}};
+                Resume(null,null,CancellationToken.None,map); Put("项目甲\\b\\c","c");
+                RescueResult r=Resume(null,null,CancellationToken.None,map); Assert(r.Files==2 && r.ReusedFiles==1 && File.Exists(Path.Combine(target,"项目甲\\b\\c")),"mapped directory continuation");
+            });
+            Test("continuation new foreign child is preserved and isolated", delegate {
+                Put("dir\\a","a"); Resume(); Put("dir\\b","new"); File.WriteAllText(Path.Combine(target,"项目\\dir\\b"),"foreign");
+                RescueResult r=Resume(); Assert(r.Files==2 && r.ReusedFiles==1 && File.ReadAllText(Path.Combine(target,"项目\\dir\\b"))=="foreign","foreign child retained");
+                Assert(File.ReadAllText(Path.Combine(target,"项目\\dir\\b.重新抢救"))=="new","new child safely renamed");
+            });
+            Test("continuation corrupt journal stops before copying", delegate {
+                Put("a","a"); Resume(); File.AppendAllText(Path.Combine(attempt,"continuation-v1.tsv"),"broken\r\n");
+                Assert(Throws<IOException>(delegate { Resume(); }),"damaged ledger rejected"); Assert(Directory.GetFiles(Path.Combine(target,"项目")).Length==1,"no extra publication");
+            });
+            Test("continuation active journal rejects concurrent owner", delegate {
+                Put("a","a"); Directory.CreateDirectory(attempt);
+                using(FileStream held=new FileStream(Path.Combine(attempt,"continuation.lock"),FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))
+                { Assert(Throws<IOException>(delegate { Resume(); }),"second owner rejected"); }
+                Assert(Resume().Files==1,"released lock usable");
+            });
+            Test("continuation original target binding cannot be changed", delegate {
+                Put("a","a"); Resume(); string other=Path.Combine(Path.GetDirectoryName(target),"other-target"); Directory.CreateDirectory(other);
+                Assert(Throws<IOException>(delegate { RescueCopy.Run(source,other,"项目",null,"1",attempt,null,null,CancellationToken.None,attempt); }),"target change rejected");
+                Assert(Directory.GetFileSystemEntries(other).Length==0,"other target untouched");
+            });
+            Test("legacy complete records require source and destination hash; incomplete records recopy", delegate {
+                Put("sub\\a","same"); Put("sub\\b","new-b"); string dir=Path.Combine(target,"项目\\sub"); Directory.CreateDirectory(dir); File.WriteAllText(Path.Combine(dir,"a"),"same"); File.WriteAllText(Path.Combine(dir,"b"),"old-b"); Directory.CreateDirectory(attempt);
+                File.WriteAllText(Path.Combine(attempt,"路径清单.tsv"),"类型\t来源\t目标\t说明\r\n"+
+                    "目录\t"+Esc("Z:\\sub")+"\t"+Esc(dir)+"\t已创建\r\n"+
+                    "文件\t"+Esc("Z:\\sub\\a")+"\t"+Esc(Path.Combine(dir,"a"))+"\t完整\r\n"+
+                    "条目\t"+Esc("Z:\\sub\\b")+"\t"+Esc(Path.Combine(dir,"b"))+"\t计划\r\n",Encoding.UTF8);
+                RescueResult r=Resume(); Assert(r.Files==2 && r.ReusedFiles==1,"only complete matching legacy reused");
+                Assert(File.ReadAllText(Path.Combine(dir,"b"))=="old-b" && File.ReadAllText(Path.Combine(dir,"b.重新抢救"))=="new-b","incomplete old preserved");
+                Assert(Resume().ReusedFiles==2,"migrated receipts durable");
+            });
+
+
+            Test("continuation canceled source moves to actual different drive letter", delegate {
+                Put("tree\\a","first"); Put("tree\\b","second"); CancellationTokenSource c=new CancellationTokenSource();
+                try { Resume(delegate(string m) { if(File.Exists(Path.Combine(target,"项目\\tree\\a"))) c.Cancel(); },null,c.Token); throw new Exception("cancel ignored"); }
+                catch(RescueCanceledException e) { Assert(e.Result.Files==1,"cancel publication"); }
+                string letter=null; for(char ch='Z';ch>='D';ch--) if(!Directory.Exists(ch+":\\")) { letter=ch+":"; break; } Assert(letter!=null,"unused test drive");
+                using(Process p=Process.Start(new ProcessStartInfo("subst.exe",letter+" "+Q(source)) {UseShellExecute=false,CreateNoWindow=true})) { p.WaitForExit(); Assert(p.ExitCode==0,"subst source fixture"); }
+                try { string previous=source; source=letter+"\\"; RescueResult r=Resume(); Assert(r.Files==2 && r.ReusedFiles==1 && File.Exists(Path.Combine(target,"项目\\tree\\b")),"actual drive letter reuse"); source=previous; }
+                finally { using(Process p=Process.Start(new ProcessStartInfo("subst.exe",letter+" /D") {UseShellExecute=false,CreateNoWindow=true})) p.WaitForExit(); c.Dispose(); }
+            });
+            Test("continuation modern receipt can require full current source verification", delegate {
+                Put("a","old!"); Resume(); File.WriteAllText(Path.Combine(source,"a"),"new!",new UTF8Encoding(false));
+                RescueResult r=RescueCopy.Run(source,target,"项目",null,"1",attempt,null,null,CancellationToken.None,attempt,true);
+                Assert(r.Files==1 && r.ReusedFiles==0 && File.ReadAllText(Path.Combine(target,"项目\\a"))=="old!" && File.ReadAllText(Path.Combine(target,"项目\\a.重新抢救"))=="new!","weak disc match cannot skip different source");
+            });
+            Test("continuation real process owns journal and crash releases lock safely", delegate {
+                Put("dir\\a","a"); string barrier=Path.Combine(Path.GetDirectoryName(source),"resume-barrier");
+                string workerArgs="--concurrent-worker "+Q(source)+" "+Q(target)+" "+Q(attempt)+" "+Q(barrier)+" normal copy "+Q(attempt);
+                using(Process p=Process.Start(new ProcessStartInfo(System.Reflection.Assembly.GetExecutingAssembly().Location,workerArgs) {UseShellExecute=false,CreateNoWindow=true,RedirectStandardError=true,RedirectStandardOutput=true}))
+                {
+                    try { Stopwatch timer=Stopwatch.StartNew(); while(!File.Exists(barrier+".ready")) { if(p.HasExited) throw new Exception(p.StandardError.ReadToEnd()); Assert(timer.ElapsedMilliseconds<10000,"worker journal barrier"); Thread.Sleep(20); }
+                        Assert(Throws<IOException>(delegate { Resume(); }),"active other process explicitly rejected");
+                    } finally { if(!p.HasExited) p.Kill(); p.WaitForExit(); }
+                }
+                RescueResult r=Resume(); Assert(r.Files==1 && r.ReusedFiles==0 && File.Exists(Path.Combine(target,"项目\\dir\\a")),"crash restarts pending route");
+            });
+            Test("continuation target GUID survives root alias change", delegate {
+                string id=Guid.NewGuid().ToString("N"); File.WriteAllText(Path.Combine(target,".discarchive-target.id"),id); Put("a","a"); Resume();
+                string shifted=target+"-mapped"; Directory.Move(target,shifted); target=shifted; attempt=Path.Combine(target,"attempt");
+                RescueResult r=Resume(); Assert(r.ReusedFiles==1 && File.Exists(Path.Combine(target,"项目\\a")),"same GUID relative route relocated");
+                File.WriteAllText(Path.Combine(target,".discarchive-target.id"),Guid.NewGuid().ToString("N"));
+                Assert(Throws<IOException>(delegate { Resume(); }),"different marker not accepted");
+            });
+            Test("legacy target root alias uses replica identity without reading old root", delegate {
+                string id=Guid.NewGuid().ToString("N"); File.WriteAllText(Path.Combine(target,".discarchive-target.id"),id); Put("a","same");
+                Directory.CreateDirectory(attempt); Directory.CreateDirectory(Path.Combine(target,"项目")); File.WriteAllText(Path.Combine(target,"项目\\a"),"same");
+                string old="Z:\\old-backup";
+                File.WriteAllText(Path.Combine(attempt,"entry.xml"),"<ArrayOfEntry><Entry><TargetId>"+id+"</TargetId><TargetRoot>"+old+"</TargetRoot></Entry></ArrayOfEntry>");
+                File.WriteAllText(Path.Combine(attempt,"路径清单.tsv"),"文件\t"+Esc("Q:\\a")+"\t"+Esc(old+"\\项目\\a")+"\t完整\r\n");
+                Assert(Resume().ReusedFiles==1,"legacy aliases rebase via registered target identity");
+            });
+
+            Test("legacy canonical job discovers dated attempt record and escaped file name", delegate {
+                Put("子目录\\名称","same"); Directory.CreateDirectory(Path.Combine(target,"项目")); string dest=Path.Combine(target,"项目\\子目录\\名称"); Directory.CreateDirectory(Path.GetDirectoryName(dest)); File.WriteAllText(dest,"same");
+                string record=Path.Combine(attempt,"抢救-20261119-aaaaaa\\抢救记录-old"); Directory.CreateDirectory(record);
+                File.WriteAllText(Path.Combine(record,"路径清单.tsv"),"文件\t"+Esc("Q:\\子目录\\名称")+"\t"+Esc(dest)+"\t完整\r\n");
+                Assert(Resume().ReusedFiles==1,"nested old attempts and TSV unescape");
+            });
+            Test("legacy wrong target root and escaped traversal rejected", delegate {
+                Put("a","a"); Directory.CreateDirectory(attempt); string old=Path.Combine(Path.GetDirectoryName(target),"private-a");
+                File.WriteAllText(Path.Combine(attempt,"路径清单.tsv"),"文件\t"+Esc("Z:\\a")+"\t"+Esc(old)+"\t完整\r\n");
+                Assert(Throws<IOException>(delegate { Resume(); }),"foreign legacy target rejected before access");
+            });
+
+
+            Test("continuation missing old source files stay unconfirmed without touching backup", delegate {
+                Put("dir\\a","a"); Put("dir\\b","b"); Resume(); File.Delete(Path.Combine(source,"dir\\b"));
+                RescueResult r=Resume(); Assert(r.Files==1 && r.ReusedFiles==1 && r.Failed==1,"missing receipt prevents all-complete");
+                Assert(File.ReadAllText(Path.Combine(target,"项目\\dir\\b"))=="b","old backup retained");
+                Assert(File.ReadAllText(Path.Combine(Path.GetDirectoryName(r.Report),"失败清单.tsv")).Contains("旧回执条目本轮缺失"),"explicit missing receipt");
+                Assert(Resume().Failed==1,"missing remains pending on later retry"); Put("dir\\b","b"); Assert(Resume().Failed==0,"restored source clears uncertainty only after encounter");
+            });
+
+            Test("continuation directory enumeration error does not duplicate descendant missing counts", delegate {
+                Put("dir\\a","a"); Put("dir\\b","b"); Resume(); HashSet<string> oldReports=new HashSet<string>(Directory.GetFiles(attempt,"路径清单.tsv",SearchOption.AllDirectories)); bool moved=false;
+                RescueResult r=RescueCopy.Run(source,target,"项目",null,"1",attempt,null,delegate {
+                    if(!moved) foreach(string report in Directory.GetFiles(attempt,"路径清单.tsv",SearchOption.AllDirectories))
+                        if(!oldReports.Contains(report) && SharedText(report).Contains("已创建"))
+                        { Directory.Move(Path.Combine(source,"dir"),source+"-removed-dir"); moved=true; break; }
+                },CancellationToken.None,attempt);
+                Assert(moved && r.Files==0 && r.Failed==1,"one enumeration failure covers two unavailable descendants");
+                Assert(File.Exists(Path.Combine(target,"项目\\dir\\a")) && File.Exists(Path.Combine(target,"项目\\dir\\b")),"existing backup protected");
+            });
+            Test("continuation empty directory changes do not invent missing file failures", delegate {
+                Put("dir\\a","a"); Directory.CreateDirectory(Path.Combine(source,"empty")); Resume(); Directory.Delete(Path.Combine(source,"empty")); Directory.CreateDirectory(Path.Combine(source,"new-empty"));
+                RescueResult r=Resume(); Assert(r.Files==1 && r.ReusedFiles==1 && r.Failed==0,"only file receipts require encounter");
+            });
+            Test("continuation old file replaced by directory remains unconfirmed", delegate {
+                Put("a","a"); Resume(); File.Delete(Path.Combine(source,"a")); Directory.CreateDirectory(Path.Combine(source,"a"));
+                RescueResult r=Resume(); Assert(r.Files==0 && r.Failed==1 && File.ReadAllText(Path.Combine(target,"项目\\a"))=="a","type change does not validate old file"); Assert(Resume().Failed==1,"type-change uncertainty survives another retry");
             });
             Console.WriteLine("PASS " + passed + " rescue tests. Isolated fixture: " + root); return 0;
         }

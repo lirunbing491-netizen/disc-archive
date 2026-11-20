@@ -24,6 +24,9 @@ internal static class OpticalTests
     }
     public static int Main(string[] args)
     {
+        Check(OpticalNative.CounterError(true,0,0)==0,"successful check without count may try read-access counter or locked fallback");
+        Check(OpticalNative.CounterError(true,2,0)==13,"truncated nonempty counter remains invalid");
+        Check(OpticalNative.CounterError(false,0,1112)==1112,"absent disc does not become an unsupported counter");
         try
         {
             uint mode = GetThreadErrorMode();

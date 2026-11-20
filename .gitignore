@@ -14,3 +14,13 @@
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Local extraction of the pinned upstream distributions used for inspection.
+/vendor/7zip/source/
+/vendor/7zip/x64/*
+!/vendor/7zip/x64/7z.dll
+/vendor/7zip/x86/*
+!/vendor/7zip/x86/7z.dll
+/vendor/7zip/downloads/*.exe
+/vendor/7zip/*.json
+/vendor/7zip/capabilities-*.txt

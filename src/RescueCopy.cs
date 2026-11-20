@@ -10,7 +10,7 @@ namespace DiscArchive
 {
     internal sealed class RescueResult
     {
-        public long Files, Bytes, Failed;
+        public long Files, Bytes, Failed, ReusedFiles, ReusedBytes;
         public string Report;
     }
 
@@ -32,9 +32,9 @@ namespace DiscArchive
     {
         internal static RescueResult Run(string sourceRoot, string targetRoot, string defaultFolder,
             IDictionary<string, string> topFolders, string discId, string attemptDir,
-            Action<string> progress, Action verify, CancellationToken cancel)
+            Action<string> progress, Action verify, CancellationToken cancel, string continuationDir = null, bool verifySourceForReuse = false, DiscSource media = null)
         {
-            return new Worker(sourceRoot, targetRoot, defaultFolder, topFolders, discId, attemptDir, progress, verify, cancel).Run();
+            return new Worker(sourceRoot, targetRoot, defaultFolder, topFolders, discId, attemptDir, progress, verify, cancel, continuationDir, verifySourceForReuse, media ?? DiscSource.Windows).Run();
         }
 
         private sealed class Worker
@@ -49,21 +49,32 @@ namespace DiscArchive
             private readonly RescueResult result = new RescueResult();
             private StreamWriter paths, failures, status;
             private string fragments;
+            private readonly string continuationDir;
+            private readonly bool verifySourceForReuse;
+            private readonly DiscSource media;
+            private ContinuationJournal journal;
             private readonly Stopwatch clock = Stopwatch.StartNew();
             private long verifiedAt = -1000, reportedAt = -1000;
 
-            internal Worker(string s, string t, string f, IDictionary<string, string> m, string d, string a, Action<string> p, Action v, CancellationToken c)
+            internal Worker(string s, string t, string f, IDictionary<string, string> m, string d, string a, Action<string> p, Action v, CancellationToken c, string continuation, bool verifySource, DiscSource sourceMedia)
             {
-                source = Full(s); target = Full(t); attempt = Full(a); Name(f); ProjectName(f); fallback = f;
+                media = sourceMedia; source = Full(s); target = Full(t); attempt = Full(a); Name(f); ProjectName(f); fallback = f;
+                continuationDir = continuation; verifySourceForReuse = verifySource;
                 disc = SafeDisc(d); progress = p; verify = v; cancel = c;
                 if (Within(source, target) || Within(target, source) || Within(source, attempt) || Within(attempt, source))
                     throw new IOException("来源不能与目标或抢救记录目录重叠。");
-                Parents(source); Parents(target); Parents(attempt);
-                if (!Directory.Exists(source) || !Directory.Exists(target)) throw new IOException("来源或目标目录不存在。");
+                SourceParents(source); Parents(target); Parents(attempt);
+                if ((media.Attributes(source) & FileAttributes.Directory) == 0 || !Directory.Exists(target)) throw new IOException("来源或目标目录不存在。");
                 if (m != null) foreach (KeyValuePair<string, string> item in m) { Name(item.Key); Name(item.Value); ProjectName(item.Value); mapping.Add(item.Key, item.Value); }
             }
 
             internal RescueResult Run()
+            {
+                using (journal = continuationDir == null ? null : new ContinuationJournal(continuationDir, source, target))
+                { return RunCore(); }
+            }
+
+            private RescueResult RunCore()
             {
                 Directory.CreateDirectory(attempt);
                 // Every run owns a unique report area, even when the caller reuses an attempt directory.
@@ -76,7 +87,7 @@ namespace DiscArchive
                 using (status = Writer(result.Report))
                 {
                     paths.WriteLine("类型\t来源\t目标\t说明"); failures.WriteLine("来源\t目标\t错误\t残片");
-                    status.WriteLine("状态\t完整文件\t完整字节\t失败条目\t说明");
+                    status.WriteLine("状态\t完整文件\t完整字节\t失败条目\t说明\t时间提示\t沿用文件\t沿用字节");
                     try
                     {
                         Check(); Save("进行中", "按可见文件抢救；不代表影碟可播放或音轨提取成功。");
@@ -90,6 +101,8 @@ namespace DiscArchive
                                 return;
                             }
                             string dst;
+                            ContinuationJournal.Entry known = journal == null ? null : journal.Find(entry);
+                            if (known != null) { Visit(entry, journal.Destination(known)); return; }
                             using (AllocationLock())
                             {
                                 Parents(project); Directory.CreateDirectory(project);
@@ -103,6 +116,8 @@ namespace DiscArchive
                             }
                             Visit(entry, dst);
                         }, target);
+                        if (journal != null) foreach (KeyValuePair<string, ContinuationJournal.Entry> missing in journal.MissingFiles())
+                            Fail(missing.Key, journal.Destination(missing.Value), "旧回执条目本轮缺失，保留旧物并需复查；本轮未确认该文件。", "");
                         Check(); Save(result.Files == 0 ? "未抢救到文件" : "完成", result.Files == 0 ? "没有抢救到完整可见文件；音频轨道、不可见视频轨道及不可读取内容未提取，请检查失败清单。" : result.Failed == 0 ? "可见文件读取完成；未做试播。" : "部分条目失败，见失败清单。");
                         return result;
                     }
@@ -182,15 +197,50 @@ namespace DiscArchive
                 }
             }
 
+            private void SourceParents(string path)
+            {
+                string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+                if (full.EndsWith(":")) full += Path.DirectorySeparatorChar;
+                if (!Within(source, full)) throw new IOException("来源路线越界：" + path);
+                if (media.Native) { Parents(full); return; }
+                string current = full;
+                while (Within(source, current))
+                {
+                    if ((media.Attributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("拒绝来源重解析点：" + current);
+                    if (String.Equals(Full(current), source, StringComparison.OrdinalIgnoreCase)) break;
+                    current = Path.GetDirectoryName(current);
+                }
+            }
+
             private bool SourceDirectory(string src)
             {
-                try { Parents(src); return (File.GetAttributes(src) & FileAttributes.Directory) != 0; }
+                try { SourceParents(src); return (media.Attributes(src) & FileAttributes.Directory) != 0; }
                 catch (Exception e) { if (!SourceError(e)) throw; return false; }
             }
 
             private void MapProjectDirectory(string src, string project)
             {
-                Check(); Parents(src); Parents(project);
+                Check(); SourceParents(src); Parents(project);
+                ContinuationJournal.Entry known = journal == null ? null : journal.Find(src);
+                if (known != null && known.Directory)
+                {
+                    string routed = journal.Destination(known);
+                    if (File.Exists(routed)) throw new IOException("续拷项目目录已被文件占用。");
+                    Directory.CreateDirectory(routed);
+                    Enumerate(src, delegate(string child) {
+                        string childDestination = Path.Combine(routed, Path.GetFileName(child));
+                        if (journal.Find(child) == null)
+                        {
+                            using (AllocationLock())
+                            {
+                                if (Conflict(childDestination)) childDestination = FreshDestinationLocked(childDestination);
+                                else Claim(childDestination);
+                            }
+                        }
+                        Visit(child, childDestination);
+                    }, routed);
+                    Check(); ValidateOutput(routed, true, 0); return;
+                }
                 List<string> children = new List<string>();
                 Enumerate(src, delegate(string child) { children.Add(child); }, project);
                 bool collision = false; string destination;
@@ -214,6 +264,7 @@ namespace DiscArchive
                     }
                     foreach (string child in children) Claim(Path.Combine(destination, Path.GetFileName(child)));
                 }
+                if (journal != null) journal.Route(src, destination, true);
                 paths.WriteLine("项目目录\t" + E(src) + "\t" + E(destination) + "\t" + (collision ? "同组子项整体隔离" : "源顶层项目目录对应目标项目根"));
                 foreach (string child in children) Visit(child, Path.Combine(destination, Path.GetFileName(child)));
                 Check(); ValidateOutput(destination, true, 0);
@@ -253,7 +304,7 @@ namespace DiscArchive
             {
                 Check();
                 IEnumerator<string> iterator = null;
-                try { iterator = Directory.EnumerateFileSystemEntries(src).GetEnumerator(); }
+                try { iterator = media.Entries(src).GetEnumerator(); }
                 catch (Exception e) { if (!SourceError(e)) throw; Fail(src, dst, "目录枚举失败：" + e.Message, ""); return; }
                 using (iterator)
                 {
@@ -270,13 +321,21 @@ namespace DiscArchive
             private void Visit(string src, string dst)
             {
                 Check(); Parents(dst);
+                ContinuationJournal.Entry prior = journal == null ? null : journal.Find(src);
+                if (prior != null) dst = journal.Destination(prior);
                 paths.WriteLine("条目\t" + E(src) + "\t" + E(dst) + "\t计划");
                 FileAttributes attrs;
-                try { Parents(src); attrs = File.GetAttributes(src); }
+                try { SourceParents(src); attrs = media.Attributes(src); }
                 catch (Exception e) { if (!SourceError(e)) throw; Fail(src, dst, e.Message, ""); return; }
+                if (journal != null) journal.Encounter(src, (attrs & FileAttributes.Directory) != 0);
                 if ((attrs & FileAttributes.Directory) != 0)
                 {
-                    if (Exists(dst)) throw new IOException("目标在复制期间出现同名条目：" + dst);
+                    if (prior == null || !prior.Directory)
+                    {
+                        if (Exists(dst)) dst = FreshDestination(dst);
+                        if (journal != null) journal.Route(src, dst, true);
+                    }
+                    if (File.Exists(dst)) throw new IOException("续拷目录被文件占用：" + dst);
                     Directory.CreateDirectory(dst);
                     paths.WriteLine("目录\t" + E(src) + "\t" + E(dst) + "\t已创建");
                     string leaf = Path.GetFileName(src);
@@ -289,14 +348,34 @@ namespace DiscArchive
                 if (String.Equals(Path.GetExtension(src), ".cda", StringComparison.OrdinalIgnoreCase))
                 { Fail(src, dst, "CDA 是音轨占位符，未提取音频，不能算抢救成功。", ""); return; }
                 Check();
-                FileStream input = null; long length;
-                try { Parents(src); input = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.Read); length = input.Length; }
+                if (prior != null && File.Exists(dst))
+                {
+                    long oldLength = new FileInfo(dst).Length;
+                    string digest = ContinuationJournal.HashFile(dst, cancel, delegate { Check(false); });
+                    bool reusable = prior.Complete && prior.Length == oldLength && prior.Hash == digest;
+                    if ((!prior.Complete && prior.Hash == "legacy") || (reusable && verifySourceForReuse))
+                    {
+                        try { reusable = media.Length(src) == oldLength && ContinuationJournal.HashFile(src, cancel, delegate { Check(false); }, media) == digest; }
+                        catch (Exception e) { if (!SourceError(e)) throw; Check(); Fail(src, dst, e.Message, ""); return; }
+                    }
+                    if (reusable)
+                    {
+                        journal.Complete(src, dst, oldLength, digest);
+                        result.Files++; result.Bytes += oldLength; result.ReusedFiles++; result.ReusedBytes += oldLength;
+                        paths.WriteLine("文件\t" + E(src) + "\t" + E(dst) + "\tSHA256核实沿用 " + digest); Save("进行中", src); return;
+                    }
+                }
+                if (Exists(dst)) dst = FreshDestination(dst);
+                if (journal != null) journal.Route(src, dst, false);
+                Stream input = null; long length;
+                try { SourceParents(src); length = media.Length(src); input = media.OpenRead(src); if (input.Length != length) throw new IOException("来源长度发生变化。"); }
                 catch (Exception e) { if (input != null) input.Dispose(); if (!SourceError(e)) throw; Fail(src, dst, e.Message, ""); return; }
                 try { Report(src, 0, length, true); }
                 catch { input.Dispose(); throw; }
                 string fragment = Path.Combine(fragments, Guid.NewGuid().ToString("N") + ".partial");
                 paths.WriteLine("残片\t" + E(src) + "\t" + E(dst) + "\t" + E(fragment));
-                long read = 0; Exception readError = null;
+                long read = 0; Exception readError = null; string copiedHash;
+                using (SHA256 hash = SHA256.Create())
                 using (input)
                 using (FileStream output = new FileStream(fragment, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
                 {
@@ -307,11 +386,12 @@ namespace DiscArchive
                         try { n = input.Read(buffer, 0, buffer.Length); }
                         catch (Exception e) { if (!SourceError(e)) throw; readError = e; break; }
                         if (n == 0) break;
-                        output.Write(buffer, 0, n); read += n;
+                        output.Write(buffer, 0, n); hash.TransformBlock(buffer, 0, n, buffer, 0); read += n;
                         Report(src, read, length, false);
                         if (read > length) { readError = new IOException("来源长度发生变化。"); break; }
                     }
                     output.Flush(true);
+                    hash.TransformFinalBlock(new byte[0], 0, 0); copiedHash = BitConverter.ToString(hash.Hash).Replace("-", "");
                     if (read != length && readError == null) readError = new IOException("未读到源文件完整长度。");
                 }
                 if (readError != null) { Check(); Fail(src, dst, readError.Message, fragment); return; }
@@ -334,18 +414,43 @@ namespace DiscArchive
                     // Keep the recovery copy: deleting user-visible files is never necessary here.
                 }
                 result.Files++; result.Bytes += read;
+                if (journal != null) journal.Complete(src, dst, read, copiedHash);
                 paths.WriteLine("文件\t" + E(src) + "\t" + E(dst) + "\t完整 " + read + " 字节"); Save("进行中", src);
                 Report(src, read, length, true);
+            }
+
+            private string FreshDestination(string dst)
+            {
+                using (AllocationLock())
+                {
+                    return FreshDestinationLocked(dst);
+                }
+            }
+
+            private string FreshDestinationLocked(string dst)
+            {
+                string dir=Path.GetDirectoryName(dst), name=Path.GetFileNameWithoutExtension(dst), extension=Path.GetExtension(dst);
+                for(int next=1;;next++)
+                {
+                    string suffix=next==1 ? ".重新抢救" : ".重新抢救-"+next;
+                    int room=255-extension.Length-suffix.Length;
+                    if(room<1) throw new IOException("无法为超长扩展名生成安全的补拷副本："+dst);
+                    string head=name.Length>room ? name.Substring(0,room) : name;
+                    string fresh=Path.Combine(dir,head+suffix+extension);
+                    if(Exists(fresh) || Claimed(fresh)) continue;
+                    Claim(fresh); return fresh;
+                }
             }
 
             private void Fail(string src, string dst, string message, string fragment)
             {
                 // A source error must not hide a changed disc, cancellation, or a lost output volume.
                 Check(); result.Failed++;
+                if (journal != null) journal.Uncertain(src);
                 failures.WriteLine(E(src) + "\t" + E(dst) + "\t" + E(message) + "\t" + E(fragment));
                 paths.WriteLine("失败\t" + E(src) + "\t" + E(dst) + "\t" + E(message)); Save("进行中", message);
             }
-            private void Save(string state, string note) { status.WriteLine(state + "\t" + result.Files + "\t" + result.Bytes + "\t" + result.Failed + "\t" + E(note)); }
+            private void Save(string state, string note) { status.WriteLine(state + "\t" + result.Files + "\t" + result.Bytes + "\t" + result.Failed + "\t" + E(note)+"\t0\t"+result.ReusedFiles+"\t"+result.ReusedBytes); }
             private void TrySave(string state, string note) { try { Save(state, note); } catch { /* Result still travels in the exception if the report disk was lost. */ } }
         }
 

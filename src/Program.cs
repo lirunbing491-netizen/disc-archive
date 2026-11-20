@@ -27,12 +27,14 @@ namespace DiscArchive
         }
         internal static string PrepareTrial(string previous)
         {
-            string trial=Path.Combine(previous,"多光驱版");
+            string trial=Path.Combine(previous,"Mac光盘兼容试用版");
             if(Directory.Exists(trial)) return trial;
             Directory.CreateDirectory(previous);
             string v1=Path.Combine(previous,"抢救版");
-            string source=Directory.Exists(v1) ? v1 : previous;
-            string stage=Path.Combine(previous,"多光驱版-初始化-"+Guid.NewGuid().ToString("N"));
+            string multi=Path.Combine(previous,"多光驱版");
+            string resume=Path.Combine(previous,"续导本地试用版");
+            string source=Directory.Exists(resume) ? resume : Directory.Exists(multi) ? multi : (Directory.Exists(v1) ? v1 : previous);
+            string stage=Path.Combine(previous,"格式兼容版-初始化-"+Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(stage);
             // v1 cannot round-trip the new XML fields. Isolate the catalog while keeping
             // existing records and their thumbnail paths accessible in the parent directory.

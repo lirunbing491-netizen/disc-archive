@@ -23,7 +23,7 @@ namespace DiscArchive
         public string[] Drives() { return Connected ? new string[] { @"X:\" } : new string[0]; }
         public bool Empty(string root) { return Connected && !Loaded; }
         public bool Ready(string root) { return Connected && Loaded; }
-        public string Label="170621-星河访谈素材";
+        public string Label="130708-星河访谈素材";
         public MountedDisc Open(string root)
         {
             Interlocked.Increment(ref Runs);
@@ -105,6 +105,9 @@ namespace DiscArchive
                     Field<TextBox>(f,"target").Text=disk;
                     Field<TextBox>(f,"project").Text="星河访谈素材";
                     Workstation station=Field<Workstation>(f,"station");
+                    // The fixture's second physical disc deliberately repeats the first file.
+                    // Its other file is unreadable; the operator knows these are distinct discs.
+                    station.ChooseMatch=delegate { return System.Threading.Tasks.Task.FromResult<DiscMatch>(null); };
                     Check(Field<VisionOptions>(f,"vision").Mode=="metadata","default archive needs no model, connection or OCR");
                     Field<VisionOptions>(f,"vision").Mode="ocr";
                     Call(f,"BeginWatch",inbox); WaitMs(1700);
@@ -115,7 +118,7 @@ namespace DiscArchive
                     Check(first.Status==Workstation.Waiting && station.EmptySeen && reader.Runs==0,"fresh photo receives one ID before disc insertion");
                     Check(File.ReadAllBytes(label).SequenceEqual(File.ReadAllBytes(first.OriginalPhoto)) && File.Exists(first.Photo),"archive holds original photo and registry holds preview");
                     Snap(f,Path.Combine(root,"capture-screen.png"));
-                    string dcim=Path.Combine(disk,"170621-星河访谈素材","DCIM");
+                    string dcim=Path.Combine(disk,"130708-星河访谈素材","DCIM");
                     DateTime oldTime=new DateTime(2008,5,6,12,0,0,DateTimeKind.Utc);
                     File.SetLastWriteTimeUtc(original,oldTime);
                     Directory.SetLastWriteTimeUtc(Path.Combine(source,"DCIM"),oldTime);
@@ -133,11 +136,11 @@ namespace DiscArchive
                     Check(held!=null && done.Warnings==0 && done.Failed==0 && !done.Note.Contains("时间"),"locked output directory still completes without any timestamp maintenance");
                     var popup=NoticeFor("本张已拷出，可以换盘");
                     Check(popup!=null && popup.AccessibleDescription.Contains(done.Project) && popup.AccessibleDescription.Contains("失败条目 0"),"actual completion automatically shows a success notice with counts");
-                    string saved=Path.Combine(disk,"170621-星河访谈素材","DCIM","00001.MTS");
+                    string saved=Path.Combine(disk,"130708-星河访谈素材","DCIM","00001.MTS");
                     Check(File.GetLastWriteTimeUtc(saved)!=oldTime && Directory.GetLastWriteTimeUtc(dcim)!=oldTime,"destination file and folder keep their natural copy times");
                     Check(File.ReadAllBytes(original).SequenceEqual(File.ReadAllBytes(saved)) && Directory.Exists(Path.Combine(Path.GetDirectoryName(saved),"空文件夹")),"verified output preserves files and empty folders");
                     Check(File.ReadAllText(Path.Combine(done.Report,"路径清单.tsv")).Contains("00001.MTS"),"source/destination register is readable");
-                    Check(done.ArchiveFolders.Single()=="170621-星河访谈素材" && done.NamingReason.Contains("卷标") && done.PhotoText.Contains("2024"),"directory name and OCR evidence are independent");
+                    Check(done.ArchiveFolders.Single()=="130708-星河访谈素材" && done.NamingReason.Contains("卷标") && done.PhotoText.Contains("2024"),"directory name and OCR evidence are independent");
                     Check(File.ReadAllBytes(label).SequenceEqual(File.ReadAllBytes(Path.Combine(disk,done.Project,"盘面照片",done.Id+".jpg"))),"full disc image filed with project");
                     Field<TabControl>(f,"tabs").SelectedIndex=1;
                     Field<TextBox>(f,"editTitle").Text="虚构庆典 B机 第2盘";
@@ -192,7 +195,7 @@ namespace DiscArchive
             {
                 Workstation s=new Workstation(new Catalog(Path.Combine(root,"gate-state")),drive,delegate(string path,CancellationToken token) {
                     if(!recognition.WaitOne(10000)) throw new TimeoutException();
-                    return "170621-错误候选";
+                    return "130708-错误候选";
                 },delegate {return "model";});
                 drive.Loaded=true;
                 Entry e=s.Register(label,disk,"",@"X:\","",true);

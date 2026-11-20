@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -19,11 +19,11 @@ namespace DiscArchive
         internal static DateTime? Read(string path, CancellationToken cancel)
         {
             DateTime? digitized;
-            return Read(path, cancel, out digitized, null);
+            return Read(path, cancel, out digitized, (Action<string>)null);
         }
 
         internal static DateTime? Read(string path, CancellationToken cancel, out DateTime? digitized)
-        { return Read(path, cancel, out digitized, null); }
+        { return Read(path, cancel, out digitized, (Action<string>)null); }
 
         // Evidence callback is optional and emits only metadata locations and the chosen tag.
         internal static DateTime? Read(string path, CancellationToken cancel, Action<string> evidence)
@@ -34,17 +34,29 @@ namespace DiscArchive
 
         private static DateTime? Read(string path, CancellationToken cancel, out DateTime? digitized, Action<string> evidence)
         {
+            return Read(path,cancel,out digitized,DiscSource.Windows,evidence);
+        }
+
+        internal static DateTime? Read(string path, CancellationToken cancel, out DateTime? digitized, DiscSource media, Action<string> evidence = null)
+        {
+            digitized = null;
+            cancel.ThrowIfCancellationRequested();
+            try { using (Stream input = (media ?? DiscSource.Windows).OpenRead(path)) return Read(input,cancel,out digitized,evidence); }
+            catch (IOException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (System.Security.SecurityException) { return null; }
+            catch (ArgumentException) { return null; }
+        }
+
+        // The caller owns the seekable stream; metadata reads retain their existing bounds.
+        internal static DateTime? Read(Stream input, CancellationToken cancel, out DateTime? digitized, Action<string> evidence = null)
+        {
             digitized = null;
             cancel.ThrowIfCancellationRequested();
             try
             {
-                using (FileStream input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.RandomAccess))
-                {
-                    Reader reader = new Reader(input, cancel, evidence);
-                    DateTime? capture = reader.Run();
-                    digitized = reader.Digitized;
-                    return capture;
-                }
+                Reader reader = new Reader(input, cancel, evidence);
+                DateTime? capture = reader.Run(); digitized = reader.Digitized; return capture;
             }
             catch (BudgetException) { return null; }
             catch (IOException) { return null; }
