@@ -9,7 +9,7 @@ includes specific terms for certain files including unRAR code.
 The bridge is built from macos/Archive/native/discarchive7z.cpp. To rebuild the
 library or replace it with a modified one, follow macos/Archive/README.md and
 use macos/Archive/build-native.sh with the desired source tree. The outputs
-belong in Contents/Helpers/<architecture>/native. Re-sign a locally modified
+belong in Contents/Resources/Runtime/<architecture>/native. Re-sign a locally modified
 bundle before running it. The sources for the scripts and bridge are available
 in the same public source tree as the app.
 

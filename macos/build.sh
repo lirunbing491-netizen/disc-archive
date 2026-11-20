@@ -7,7 +7,7 @@ case "$arch" in x64) cpu=x86_64;; arm64) cpu=arm64;; *) exit 2;; esac
 export MACOSX_DEPLOYMENT_TARGET=13.0
 mkdir -p "$out"; out="$(cd "$out" && pwd)"; app="$out/DiscArchive.app"
 [[ ! -e "$app" ]] || { echo "Use a new output directory." >&2; exit 2; }
-contents="$app/Contents"; helpers="$contents/Helpers/$arch"; frameworks="$contents/Frameworks"; bin="$contents/MacOS"
+contents="$app/Contents"; helpers="$contents/Resources/Runtime/$arch"; frameworks="$contents/Frameworks"; bin="$contents/MacOS"
 mkdir -p "$bin" "$frameworks" "$helpers" "$contents/Resources"
 cp "$repo/macos/Info.plist" "$contents/Info.plist"; plutil -lint "$contents/Info.plist"
 flags=(-arch "$cpu" -mmacosx-version-min=13.0 -fobjc-arc -fblocks -framework Foundation -framework IOKit -framework DiskArbitration -framework DiscRecording)
@@ -70,6 +70,10 @@ codesign --force --sign - --timestamp=none "$frameworks/libDiscDevices.dylib"
 codesign --force --sign - --timestamp=none "$helpers/native/7z.so"
 codesign --force --sign - --timestamp=none "$helpers/native/libdiscarchive7z.dylib"
 codesign --force --sign - --timestamp=none "$helpers/discarchive-core"
+for native in "$helpers"/*.dylib "$helpers"/native/*; do
+  codesign --verify --strict "$native" || codesign --force --sign - --timestamp=none "$native"
+  codesign --verify --strict "$native"
+done
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$bin/DiscArchive" --check-package

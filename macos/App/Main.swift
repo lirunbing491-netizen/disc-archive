@@ -10,7 +10,7 @@ enum MacBundle {
     #else
     static let arch = "x64"
     #endif
-    static let helpers = contents.appendingPathComponent("Helpers/" + arch, isDirectory: true)
+    static let helpers = contents.appendingPathComponent("Resources/Runtime/" + arch, isDirectory: true)
     static let core = helpers.appendingPathComponent("discarchive-core")
     static let checkingWorkbench = CommandLine.arguments == [CommandLine.arguments[0], "--check-workbench"]
     static let state: URL = {

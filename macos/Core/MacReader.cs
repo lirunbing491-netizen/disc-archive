@@ -71,6 +71,55 @@ internal sealed class MacReader : IReader
         if(warningsOnly && (!info.RootElement.TryGetProperty("uncovered",out var b)||b.ValueKind!=JsonValueKind.True))return "";
         return info.RootElement.TryGetProperty("note",out var n)?n.GetString()??"":"";
     }
+    private sealed class CoverageRange {
+        internal long Start,End;
+        internal readonly HashSet<string> Families=new(StringComparer.Ordinal);
+    }
+    private static string CoverageFamily(string format) {
+        string f=(format??"").Trim().ToLowerInvariant();
+        if(f.Length==0)return "";
+        if(f.Contains("hfs"))return "HFS";
+        if(f.Contains("apfs"))return "APFS";
+        if(f.Contains("udf"))return "UDF";
+        if(f=="iso"||f.Contains("9660")||f.Contains("joliet"))return "ISO";
+        return "other:"+f;
+    }
+    // This proves only a lower bound on identified omissions. Unknown registry
+    // offsets never become zero; unknown mounted formats can cover any one range.
+    // Overlapping filesystem views are one possible coverage unit, not extra
+    // partitions. Whole-disc ISO/UDF bridge views must not hide real Apple-map
+    // partitions, which the existing parser has independently validated.
+    internal static string MountedCoverage(DiscLayout layout,IList<MacVolume> mounted,long sourceSize) {
+        if(layout==null||sourceSize<=0)return "";
+        var candidates=layout.Volumes.Where(v=>v.Offset>=0&&v.Length>0&&v.Offset<=sourceSize&&v.Length<=sourceSize-v.Offset).ToList();
+        bool appleMap=layout.HasPartitionMap&&candidates.Any(v=>v.Offset>0&&(CoverageFamily(v.Format)=="HFS"||CoverageFamily(v.Format)=="APFS"));
+        if(appleMap)candidates=candidates.Where(v=>CoverageFamily(v.Format)=="HFS"||CoverageFamily(v.Format)=="APFS").ToList();
+        var ranges=new List<CoverageRange>();
+        foreach(var v in candidates.OrderBy(v=>v.Offset).ThenBy(v=>v.Length)) {
+            CoverageRange range=ranges.LastOrDefault();
+            if(range==null||v.Offset>=range.End){range=new CoverageRange{Start=v.Offset,End=v.Offset+v.Length};ranges.Add(range);}
+            else range.End=Math.Max(range.End,v.Offset+v.Length);
+            range.Families.Add(CoverageFamily(v.Format));
+        }
+        if(ranges.Count==0)return "";
+        var mounts=mounted.Where(m=>!string.IsNullOrEmpty(m.mount)).GroupBy(m=>m.mount,StringComparer.Ordinal).Select(g=>g.First()).ToList();
+        int[] owner=Enumerable.Repeat(-1,ranges.Count).ToArray();
+        bool Assign(int index,bool[] seen) {
+            string family=CoverageFamily(mounts[index].format);
+            for(int i=0;i<ranges.Count;i++) {
+                if(seen[i]||(family.Length>0&&!ranges[i].Families.Contains(family)))continue;
+                seen[i]=true;
+                if(owner[i]<0||Assign(owner[i],seen)){owner[i]=index;return true;}
+            }
+            return false;
+        }
+        int covered=0;
+        for(int i=0;i<mounts.Count;i++)if(Assign(i,new bool[ranges.Count]))covered++;
+        int missing=ranges.Count-covered;
+        if(missing<=0)return "";
+        string evidence=string.Join("；",ranges.Take(16).Select(r=>r.Start+".."+r.End+" 字节（"+string.Join("/",r.Families.OrderBy(f=>f,StringComparer.Ordinal))+"）"));
+        return "同一光盘已确认 "+ranges.Count+" 个互不重叠的数据范围，本次已挂载视图最多对应其中 "+covered+" 个；至少 "+missing+" 个已识别数据范围尚未提取。布局证据："+evidence+"。未知范围未据此判失败。";
+    }
     public MountedDisc Open(string id){
         var d=Find(id)??throw new IOException("光驱已断开。");
         if(!d.ready||string.IsNullOrEmpty(d.token))throw new IOException("光盘尚未就绪。");
@@ -85,6 +134,16 @@ internal sealed class MacReader : IReader
                 try {
                     var tree=new MacMountedSource(root,volumes,guard);
                     opened=new MountedDisc(root,volumes.Count==1?volumes[0].label:"",guard,null,tree,string.Join(" + ",volumes.Select(p=>p.format).Distinct())+"（macOS 挂载视图）");
+                    // Same physical provider/token as the mounted view. Failure
+                    // to access raw or identify a layout is unknown, not proof
+                    // that another partition was omitted.
+                    try {
+                        using var raw=new DarwinOpticalStream(d,guard);
+                        DiscLayout layout=OpticalLayout.Inspect(raw);guard();
+                        string omission=MountedCoverage(layout,volumes,raw.Length);
+                        if(omission.Length>0)opened.UncoveredTracks=omission;
+                    }catch(IOException){guard();}
+                     catch(UnauthorizedAccessException){guard();}
                 }catch(UnauthorizedAccessException){guard();}
                  catch(IOException){guard();}
             }

@@ -16,6 +16,12 @@ internal static class MountedSourceTests
     }
     private static void Check(bool yes,string message){if(!yes)throw new Exception(message);passed++;Console.WriteLine("PASS "+message);}
     private static string[] Entries(object source,string path)=>((IEnumerable<string>)Call(source,"Entries",path)).ToArray();
+    private static string Named(object source,string root,string name) {
+        string[] paths=Entries(source,root);string found=paths.SingleOrDefault(p=>Path.GetFileName(p)==name);
+        if(found!=null)return found;
+        var details=new List<string>();foreach(string path in paths){try{details.Add(path+" "+Call(source,"Attributes",path));}catch(Exception ex){details.Add(path+" ERROR "+ex.Message);}}
+        throw new IOException("Mounted fixture entry missing: "+name+"; actual entries: "+string.Join(" | ",details));
+    }
     private static object Source(string root,string[] paths,Action guard) {
         Type volume=T("MacVolume");var list=(IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(volume));
         foreach(string path in paths){object v=Activator.CreateInstance(volume,true);volume.GetField("mount",Flags).SetValue(v,path);volume.GetField("label",Flags).SetValue(v,"SAME");volume.GetField("format",Flags).SetValue(v,"synthetic");list.Add(v);}
@@ -34,6 +40,26 @@ internal static class MountedSourceTests
         Check(paths.Distinct(StringComparer.OrdinalIgnoreCase).Count()==3,"Windows reserved names and case collisions remain distinct");
         object repeat=Activator.CreateInstance(T("ArchiveDiscSource"),Flags,null,new object[]{root,list,open,"","POSIX",null},null);Check(paths.SequenceEqual(Entries(repeat,root)),"unsafe-name mapping is repeatable");
     }
+    private static void Coverage() {
+        string Evaluate((string format,long offset,long length)[] regions,string[] formats,bool map=false) {
+            object layout=Activator.CreateInstance(T("DiscLayout"),true);
+            T("DiscLayout").GetField("HasPartitionMap").SetValue(layout,map);
+            var regionsList=(IList)T("DiscLayout").GetField("Volumes").GetValue(layout);
+            foreach(var r in regions){object v=Activator.CreateInstance(T("DiscVolume"),true);T("DiscVolume").GetField("Format").SetValue(v,r.format);T("DiscVolume").GetField("Offset").SetValue(v,r.offset);T("DiscVolume").GetField("Length").SetValue(v,r.length);regionsList.Add(v);}
+            Type volume=T("MacVolume");var mounted=(IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(volume));
+            for(int i=0;i<formats.Length;i++){object v=Activator.CreateInstance(volume,true);volume.GetField("mount",Flags).SetValue(v,"/fixture/volume"+i);volume.GetField("format",Flags).SetValue(v,formats[i]);volume.GetField("offset",Flags).SetValue(v,-1L);mounted.Add(v);}
+            return (string)T("MacReader").GetMethod("MountedCoverage",BindingFlags.Static|BindingFlags.NonPublic).Invoke(null,new[]{layout,mounted,(object)100000L});
+        }
+        var two=new[]{("HFS",1000L,10000L),("HFSX",20000L,10000L)};
+        Check(Evaluate(two,new[]{"hfs"},true).Contains("至少 1"),"two verified distinct data partitions and one mounted volume report a real omission");
+        Check(Evaluate(two,new[]{"hfs","hfs"},true)=="","both mounted data partitions avoid a false omission");
+        Check(Evaluate(new[]{("HFS",1000L,10000L)},new[]{"hfs"},true)=="","unknown native offset alone never causes partial completion");
+        Check(Evaluate(new[]{("HFS",1000L,10000L)},new[]{""},true)=="","unknown mounted format remains possible coverage");
+        Check(Evaluate(new[]{("ISO",0L,90000L),("UDF",0L,90000L)},new[]{"udf"})=="","overlapping ISO/UDF bridge views count once");
+        Check(Evaluate(new[]{("ISO",0L,90000L),("HFS",1000L,10000L),("HFSX",20000L,10000L)},new[]{"hfs"},true).Contains("至少 1"),"whole-disc bridge cannot hide a confirmed unmounted Apple partition");
+        Check(Evaluate(new[]{("HFS",1000L,20000L),("HFS",2000L,10000L)},new[]{"hfs"})=="","overlapping aliases do not manufacture a missing volume");
+        Check(Evaluate(Array.Empty<(string,long,long)>(),new[]{"hfs"})=="","unknown or unreadable layout does not manufacture failure");
+    }
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="setxattr",SetLastError=true)] private static extern int SetXattr([MarshalAs(UnmanagedType.LPUTF8Str)]string p,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,byte[] data,nuint size,uint pos,int options);
     public static void Main() {
         string temp=Path.Combine(Path.GetTempPath(),"discarchive-mounted-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
@@ -42,7 +68,7 @@ internal static class MountedSourceTests
             byte[] photo=Enumerable.Range(0,900000).Select(i=>(byte)(i*17)).ToArray();
             File.WriteAllBytes(Path.Combine(a,"photo.jpg"),photo);Directory.CreateDirectory(Path.Combine(a,"folder"));File.WriteAllText(Path.Combine(a,"folder","readable.txt"),"original");File.WriteAllText(Path.Combine(b,"other.txt"),"second");
             int guards=0;string virtualRoot=Path.Combine(temp,"virtual");object one=Source(virtualRoot,new[]{a},()=>guards++);
-            string photoPath=Entries(one,virtualRoot).Single(p=>Path.GetFileName(p)=="photo.jpg");
+            string photoPath=Named(one,virtualRoot,"photo.jpg");
             Check(SHA256.HashData(Read(one,photoPath)).SequenceEqual(SHA256.HashData(photo)),"photo bytes preserved; ordinary no-xattr file stays readable");
             Check(Entries(one,virtualRoot).Any(p=>Path.GetFileName(p)=="folder"),"single volume preserves original root hierarchy");
             int before=guards;using(var s=(Stream)Call(one,"OpenRead",photoPath)){int afterOpen=guards;s.Read(new byte[13],0,13);Check(guards>=afterOpen+2,"each source read verifies identity before and after");}Check(before<guards,"opening verifies identity");
@@ -51,6 +77,7 @@ internal static class MountedSourceTests
             // A stale/deleted file fails individually after enumeration.
             object stale=Source(Path.Combine(temp,"stale"),new[]{a},()=>{});string stalePhoto=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="photo.jpg");File.Delete(Path.Combine(a,"photo.jpg"));Throws(()=>Read(stale,stalePhoto),"bad individual file reports failure");string folder=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="folder");Check(Read(stale,Entries(stale,folder).Single()).Length==8,"bad file does not prevent readable sibling");
             PosixNames(temp);
+            Coverage();
             if(OperatingSystem.IsMacOS()) {
                 string file=Path.Combine(a,"forked");File.WriteAllText(file,"data");byte[] fork=Enumerable.Range(0,600000).Select(i=>(byte)(i*11)).ToArray(),finder=new byte[32];finder[0]=65;
                 Check(SetXattr(file,"com.apple.ResourceFork",fork,(nuint)fork.Length,0,0)==0,"created synthetic resource fork");Check(SetXattr(file,"com.apple.FinderInfo",finder,32,0,0)==0,"created synthetic FinderInfo");
