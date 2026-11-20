@@ -7,6 +7,8 @@
 #include <new>
 #include <cstdio>
 #include <cstdint>
+#include <map>
+#include <mutex>
 
 using ReadFn = int (*)(void *, void *, uint32_t, uint32_t *);
 using SeekFn = int (*)(void *, Int64, UInt32, UInt64 *);
@@ -18,8 +20,15 @@ using WriteFn = int (*)(void *, const void *, uint32_t, uint32_t *);
   HRESULT QueryInterface(REFIID id, void **p) throw() override { \
     *p = nullptr; if (id == IID_IUnknown || id == IID_##iface) *p = static_cast<iface *>(this); \
     if (!*p) return E_NOINTERFACE; AddRef(); return S_OK; }
+#define UNKNOWN_IMPL_WITH_BASE(iface, base) \
+  ULONG refs = 1; \
+  ULONG AddRef() throw() override { return ++refs; } \
+  ULONG Release() throw() override { ULONG n = --refs; if (!n) delete this; return n; } \
+  HRESULT QueryInterface(REFIID id, void **p) throw() override { \
+    *p = nullptr; if (id == IID_IUnknown || id == IID_##iface || id == IID_##base) *p = static_cast<iface *>(this); \
+    if (!*p) return E_NOINTERFACE; AddRef(); return S_OK; }
 struct Input final : IInStream {
-  UNKNOWN_IMPL(IInStream)
+  UNKNOWN_IMPL_WITH_BASE(IInStream, ISequentialInStream)
   void *user; ReadFn read; SeekFn seek; UInt64 position = 0;
   Input(void *u, ReadFn r, SeekFn s) : user(u), read(r), seek(s) {}
   HRESULT Read(void *p, UInt32 n, UInt32 *done) throw() override {
@@ -43,7 +52,7 @@ struct Output final : ISequentialOutStream {
   HRESULT Write(const void *p, UInt32 n, UInt32 *done) throw() override { return write(user, p, n, done); }
 };
 struct Extract final : IArchiveExtractCallback {
-  UNKNOWN_IMPL(IArchiveExtractCallback)
+  UNKNOWN_IMPL_WITH_BASE(IArchiveExtractCallback, IProgress)
   UInt32 index; Output *output; bool requested = false; Int32 result = -1;
   Extract(UInt32 i, Output *o) : index(i), output(o) {}
   HRESULT SetTotal(UInt64) throw() override { return S_OK; }
@@ -56,6 +65,19 @@ struct Extract final : IArchiveExtractCallback {
   HRESULT SetOperationResult(Int32 r) throw() override { result = r; return S_OK; }
 };
 struct Context { void *module = nullptr; IInArchive *archive = nullptr; Input *input = nullptr; std::string text; };
+// Native codec modules register C++ runtime callbacks. Pin each absolute module
+// once for the process; unloading between readers can leave exit callbacks in
+// unmapped code (observed with a portable statically linked libc++ toolchain).
+// Archive instances, source callbacks and item streams are still released fully.
+static void *loadModule(const char *path) {
+  static auto *gate = new std::mutex;
+  static auto *modules = new std::map<std::string, void *>;
+  std::lock_guard<std::mutex> lock(*gate);
+  auto found = modules->find(path); if (found != modules->end()) return found->second;
+  void *module = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+  if (module) modules->emplace(path, module);
+  return module;
+}
 struct Item { Context *context; IInStream *stream; UInt64 sourcePosition; };
 static void utf8(std::string &s, BSTR b) {
   s.clear(); if (!b) return;
@@ -74,11 +96,11 @@ int da_close(Context *c) {
   if (!c) return 0; int hr = 0;
   if (c->archive) { hr = c->archive->Close(); c->archive->Release(); }
   if (c->input) c->input->Release();
-  if (c->module) dlclose(c->module); delete c; return hr;
+  delete c; return hr;
 }
 int da_open(const char *library, const char *handler, void *user, ReadFn read, SeekFn seek, Context **out) {
   *out = nullptr; Context *c = new(std::nothrow) Context; if (!c) return E_OUTOFMEMORY;
-  c->module = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+  c->module = loadModule(library);
   if (!c->module) { da_close(c); return E_FAIL; }
   auto count = (HRESULT (*)(UInt32 *))dlsym(c->module, "GetNumberOfFormats");
   auto prop = (HRESULT (*)(UInt32, PROPID, PROPVARIANT *))dlsym(c->module, "GetHandlerProperty2");

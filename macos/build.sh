@@ -30,19 +30,32 @@ test_ipc() {
   xcrun swiftc -swift-version 5 "$repo/macos/App/IPC.swift" "$repo/macos/App/tests/IPCIntegrationTests.swift" -o "$out/test-ipc"
   "$out/test-ipc"
 }
+mkdir -p "$out/fixtures"
+export TMPDIR="$(cd "$out/fixtures" && pwd -P)/"
+export DISCARC_MEDIA_HELPER="$bin/DiscArchive" DISCARC_DEVICE_LIB="$frameworks/libDiscDevices.dylib"
+export DISCARCHIVE_NATIVE_DIR="$helpers/native" DISCARC_STATE_DIR="$out/synthetic-state" DOTNET_CLI_TELEMETRY_OPTOUT=1
+build_archive() {
+  bash "$repo/macos/Archive/build-native.sh" "$arch" "$helpers/native"
+  bash "$repo/macos/Archive/run-tests.sh" "$helpers/native"
+}
+build_core() {
+  dotnet publish "$repo/macos/Core/DiscArchiveCore.csproj" -c Release -r "osx-$arch" --self-contained true \
+    -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o "$helpers"
+  dotnet run -c Release --project "$repo/macos/tests/CoreBehaviorTests.csproj"
+  dotnet run -c Release --project "$repo/macos/tests/MountedSourceTests.csproj"
+}
 build_devices >"$out/devices.log" 2>&1 & device_pid=$!
 build_ui >"$out/ui.log" 2>&1 & ui_pid=$!
 test_ipc >"$out/ipc.log" 2>&1 & ipc_pid=$!
-bash "$repo/macos/Archive/build-native.sh" "$arch" "$helpers/native" >"$out/archive.log" 2>&1 & archive_pid=$!
-dotnet publish "$repo/macos/Core/DiscArchiveCore.csproj" -c Release -r "osx-$arch" --self-contained true \
-  -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o "$helpers" >"$out/core.log" 2>&1 & core_pid=$!
+build_archive >"$out/archive.log" 2>&1 & archive_pid=$!
+build_core >"$out/core.log" 2>&1 & core_pid=$!
 result=0
 for component in devices:$device_pid ui:$ui_pid ipc:$ipc_pid archive:$archive_pid core:$core_pid; do
   name="${component%:*}"
   if wait "${component#*:}"; then
     echo "$name passed"; tail -n 3 "$out/$name.log"
   else
-    cat "$out/$name.log"; echo "Failed to build or test $name" >&2; result=1
+    tail -n 100 "$out/$name.log"; echo "Failed to build or test $name" >&2; result=1
   fi
 done
 [[ $result == 0 ]] || exit 1
@@ -60,12 +73,5 @@ codesign --force --sign - --timestamp=none "$helpers/discarchive-core"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$bin/DiscArchive" --check-package
-export DISCARC_MEDIA_HELPER="$bin/DiscArchive" DISCARC_DEVICE_LIB="$frameworks/libDiscDevices.dylib"
-export DISCARCHIVE_NATIVE_DIR="$helpers/native" DISCARC_STATE_DIR="$out/synthetic-state" DOTNET_CLI_TELEMETRY_OPTOUT=1
-mkdir -p "$out/fixtures"
-export TMPDIR="$(cd "$out/fixtures" && pwd -P)/"
 "$helpers/discarchive-core" devices
-dotnet run -c Release --project "$repo/macos/tests/CoreBehaviorTests.csproj"
-dotnet run -c Release --project "$repo/macos/tests/MountedSourceTests.csproj"
-bash "$repo/macos/Archive/run-tests.sh" "$helpers/native"
 printf 'Built and tested %s slice in %s\n' "$cpu" "$app"

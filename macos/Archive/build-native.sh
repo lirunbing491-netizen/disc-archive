@@ -19,10 +19,10 @@ else
 fi
 if [[ "$(uname -s)" == Darwin ]]; then
   cc=clang; cxx=clang++; extra="-arch $apple_arch"; bridge=libdiscarchive7z.dylib
-  link='-dynamiclib -fPIC'; dl=()
+  link='-dynamiclib -fPIC'; dl=''
 else
   [[ "$(uname -m)" == x86_64 && "$arch" == x64 || "$(uname -m)" == aarch64 && "$arch" == arm64 ]] || { echo 'Linux validation requires matching architecture' >&2; exit 2; }
-  cc=cc; cxx=c++; extra=""; bridge=libdiscarchive7z.so; link='-shared -fPIC'; dl=(-ldl)
+  cc=cc; cxx=c++; extra=""; bridge=libdiscarchive7z.so; link='-shared -fPIC'; dl='-ldl'
 fi
 make -C "$src/CPP/7zip/Bundles/Format7zF" -f makefile.gcc -j "${JOBS:-4}" \
   CC="$cc" CXX="$cxx" MY_ARCH="$extra" LDFLAGS="$link" LFLAGS_STRIP= \
@@ -31,5 +31,7 @@ cp "$src/CPP/7zip/Bundles/Format7zF/_o/7z.so" "$out/7z.so"
 # MyWindows.cpp supplies the same Unix PROPVARIANT/BSTR allocation ABI.
 $cxx -std=c++17 -O2 -fPIC $extra $link -I "$src" \
   "$here/native/discarchive7z.cpp" "$src/CPP/Common/MyWindows.cpp" \
-  "${dl[@]}" -o "$out/$bridge"
+  $dl -o "$out/$bridge"
+test -s "$out/7z.so"
+test -s "$out/$bridge"
 printf 'Built %s and 7z.so in %s\n' "$bridge" "$out"
