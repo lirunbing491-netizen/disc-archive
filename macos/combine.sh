@@ -21,5 +21,6 @@ codesign --force --sign - --timestamp=none "$app/Contents/Frameworks/libDiscDevi
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/DiscArchive" --check-package
+"$app/Contents/MacOS/DiscArchive" --check-workbench
 ditto -c -k --keepParent "$app" "$out/DiscArchive-macOS-Universal.zip"
 (cd "$out" && shasum -a 256 DiscArchive-macOS-Universal.zip > SHA256.txt)

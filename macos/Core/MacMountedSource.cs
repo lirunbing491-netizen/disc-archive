@@ -205,7 +205,9 @@ internal sealed class MacMountedSource : DiscSource
                 if(string.IsNullOrEmpty(name)||name=="."||name==".."||name.IndexOf('\0')>=0||name.IndexOf('/')>=0)throw new IOException("原生目录清单含无效名称。");
                 names.Add(name);
             }
-            if(report.RootElement.TryGetProperty("note",out var note)&&note.ValueKind==JsonValueKind.String&&!string.IsNullOrEmpty(note.GetString()))Console.Error.WriteLine("DiscArchive directory cleanup: "+note.GetString());
+            if(report.RootElement.TryGetProperty("note",out var note)&&note.ValueKind==JsonValueKind.String&&!string.IsNullOrEmpty(note.GetString())) {
+                try{Console.Error.WriteLine("DiscArchive directory cleanup: "+note.GetString());}catch(IOException){}catch(ObjectDisposedException){}
+            }
             string error=report.RootElement.GetProperty("error").GetString();
             if(!string.IsNullOrEmpty(error))throw new IOException(error); // Keep already-added sibling names.
         }catch(Exception ex) when(ex is JsonException||ex is KeyNotFoundException||ex is InvalidOperationException) {
