@@ -55,7 +55,12 @@ also authors Joliet and UDF fixtures from a single `hello` test file using
 `hdiutil makehybrid`; it never attaches or mounts these images. These tests do
 not validate physical-disc hardware or APFS images.
 
-At initial implementation the .NET 8 test project compiled with zero errors and
-warnings on Windows. Native builds and backend runtime tests were not executable
-there: the available WSL image had no C/C++ compiler or make. A macOS CI run is
-required before claiming backend validation or shipping the native binaries.
+The native codec module is pinned once per absolute library path for the process
+lifetime. Archive objects, item streams and input callbacks are released when
+their readers close. Pinning prevents native C++ runtime exit callbacks from
+referencing unmapped library code; an actual Linux preflight exposed that crash
+when unloading/reloading the portable build between readers.
+
+The Mac workflow builds this library on both native architectures and runs the
+fixture suite before packaging the application. The same managed tests also
+exercise Unix ABI behavior on Linux x64. See the workflow for per-build results.

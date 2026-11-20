@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -15,7 +15,7 @@ internal static class SourcePipelineTests
         internal string BadRead, BadEnumeration, BadMetadata;
         internal int Opens;
         internal VirtualSource(string root=null) { if(root!=null) Root=root; Dirs.Add(Root); }
-        private static string Key(string p) { return Path.GetFullPath(p).TrimEnd('\\'); }
+        private static string Key(string p) { return Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar); }
         internal string Add(string relative, byte[] data)
         {
             string p=Path.Combine(Root,relative); Data[p]=data;
@@ -62,7 +62,7 @@ internal static class SourcePipelineTests
         work=TargetRoot();
         try
         {
-            VirtualSource media=new VirtualSource();media.Add("good.txt",Encoding.UTF8.GetBytes("good"));media.BadRead=media.Add("broken.bin",new byte[8]);media.BadEnumeration=Path.Combine(media.Root,"folder");media.Add("folder\\readable.txt",new byte[]{1,2,3});media.BadMetadata=media.Add("missing-meta.bin",new byte[4]);
+            VirtualSource media=new VirtualSource();media.Add("good.txt",Encoding.UTF8.GetBytes("good"));media.BadRead=media.Add("broken.bin",new byte[8]);media.BadEnumeration=Path.Combine(media.Root,"folder");media.Add(Path.Combine("folder","readable.txt"),new byte[]{1,2,3});media.BadMetadata=media.Add("missing-meta.bin",new byte[4]);
             Assert(!Directory.Exists(media.Root),"virtual source unexpectedly exists");
             RescueResult result=Copy(media,Target("failure-target"),Path.Combine(work,"attempt1"));
             Assert(result.Files==2 && result.Failed==3,"partial failures must preserve readable siblings: "+result.Files+"/"+result.Failed);
@@ -90,7 +90,7 @@ internal static class SourcePipelineTests
             Console.WriteLine("PASS independent virtual sessions share safe destination allocation");
             Console.WriteLine("Generated fixtures: "+work);return 0;
         }
-        catch(Exception ex){Console.Error.WriteLine(ex);Console.Error.WriteLine("Generated fixtures: "+work);return 1;}
+        catch(Exception ex){Console.Error.WriteLine(ex);for(Exception detail=ex;detail!=null;detail=detail.InnerException)Console.Error.WriteLine("HResult "+detail.GetType().Name+": 0x"+detail.HResult.ToString("X8"));Console.Error.WriteLine("Generated fixtures: "+work);return 1;}
     }
     private static string TargetRoot() { string root=Path.Combine(Path.GetTempPath(),"SourcePipelineTests-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);return root; }
 }

@@ -58,7 +58,7 @@ for component in devices:$device_pid ui:$ui_pid ipc:$ipc_pid archive:$archive_pi
     tail -n 100 "$out/$name.log"; echo "Failed to build or test $name" >&2; result=1
   fi
 done
-[[ $result == 0 ]] || exit 1
+[[ -x "$bin/DiscArchive" && -x "$helpers/discarchive-core" && -s "$frameworks/libDiscDevices.dylib" && -s "$helpers/native/libdiscarchive7z.dylib" ]] || exit 1
 cp "$repo/LICENSE" "$contents/Resources/LICENSE-DiscArchive"
 cp "$repo/vendor/7zip/LICENSE-7zip.txt" "$repo/vendor/7zip/COPYING-LGPL-2.1.txt" "$repo/vendor/7zip/unRarLicense.txt" "$archive" "$contents/Resources/"
 cp "$repo/macos/README.md" "$repo/macos/THIRD-PARTY.txt" "$contents/Resources/"
@@ -75,4 +75,5 @@ codesign --verify --deep --strict "$app"
 "$bin/DiscArchive" --check-package
 "$helpers/discarchive-core" devices
 "$bin/DiscArchive" --check-workbench
+[[ $result == 0 ]] || exit 1
 printf 'Built and tested %s slice in %s\n' "$cpu" "$app"

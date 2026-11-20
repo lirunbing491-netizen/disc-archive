@@ -404,7 +404,7 @@ namespace DiscArchive
                     // systems using the rename fallback also have a short publication gap.
                     // Persistent missing or unreadable records still fail explicitly.
                     int code = error.HResult & 0xffff;
-                    if ((code != 2 && code != 3 && code != 32 && code != 33) || DateTime.UtcNow >= deadline) throw;
+                    if ((code != 2 && code != 3 && !ArchivePath.IsSharingViolation(error)) || DateTime.UtcNow >= deadline) throw;
                     Thread.Sleep(20);
                 }
             }

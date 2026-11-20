@@ -99,11 +99,22 @@ internal static class CoreBehaviorTests
         Throws(()=>book2.Create(photo,moved,"synthetic-drive",""),"missing native photo helper fails before registration");
         Check(book2.List().Count==before,"failed thumbnail leaves no catalog entry");
     }
+    private static void SharingLocks()
+    {
+        string path=Path.Combine(root,"held.lock");
+        using(var held=new FileStream(path,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None))
+        {
+            try{using(var other=new FileStream(path,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None)){}throw new Exception("Sharing fixture did not hold the lock");}
+            catch(IOException error){Console.WriteLine("Observed FileStream sharing HResult=0x"+error.HResult.ToString("X8"));Check(ArchivePath.IsSharingViolation(error),"actual platform file-sharing exception is classified for cancellable waits");}
+        }
+        Check(!ArchivePath.IsSharingViolation(new IOException("permission denied",13))&&
+            !ArchivePath.IsSharingViolation(new IOException("access denied",unchecked((int)0x80070005))),"permission errors are never classified as retryable lock contention");
+    }
     public static async Task<int> Main()
     {
         root=Path.Combine(Path.GetTempPath(),"discarchive-mac-core-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         Console.WriteLine("Fixture: "+root);
-        WindowsJournal();await Workflow();await HostProtocolTests.Run();Console.WriteLine("PASS portable behavior total="+passed);
+        SharingLocks();WindowsJournal();await Workflow();await HostProtocolTests.Run();Console.WriteLine("PASS portable behavior total="+passed);
         if(ArchiveTreeTests.Main()!=0 || PlanTests.Main()!=0 || CameraFileDateTests.Main(new string[0])!=0 || LayoutTests.Main()!=0 || HfsGuardTests.Main()!=0 || SourcePipelineTests.Main()!=0 || IdentityTests.Main()!=0) return 1;
         Console.WriteLine("PASS all shared regression suites");return 0;
     }

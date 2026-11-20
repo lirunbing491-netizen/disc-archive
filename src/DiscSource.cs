@@ -6,6 +6,22 @@ namespace DiscArchive
 {
     internal static class ArchivePath
     {
+        internal static bool IsSharingViolation(IOException error)
+        {
+#if MAC_PORT
+            if(!OperatingSystem.IsWindows())
+            {
+                // FileStream's Unix sharing lock exposes raw EAGAIN, unlike
+                // Win32 HRESULTs. Do not retry EACCES or unrelated raw errno.
+                return error.HResult==unchecked((int)0x80070020) || error.HResult==unchecked((int)0x80070021) ||
+                    (OperatingSystem.IsLinux() && error.HResult==11) ||
+                    (OperatingSystem.IsMacOS() && error.HResult==35);
+            }
+#endif
+            int code=error.HResult&65535;
+            return code==32 || code==33;
+        }
+
 #if MAC_PORT
         internal static readonly StringComparison Comparison = StringComparison.Ordinal;
         internal static readonly StringComparer Comparer = StringComparer.Ordinal;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -168,8 +168,7 @@ namespace DiscArchive
                     try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
                     catch (IOException e)
                     {
-                        int code = e.HResult & 65535;
-                        if (code != 32 && code != 33) throw;
+                        if (!ArchivePath.IsSharingViolation(e)) throw;
                         if (cancel.WaitHandle.WaitOne(50)) cancel.ThrowIfCancellationRequested();
                         Check(false);
                     }

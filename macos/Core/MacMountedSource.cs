@@ -68,10 +68,13 @@ internal sealed class MacMountedSource : DiscSource
         try {
             Read(()=> {
                 CheckLinks(root,relative);
-                using var handle=OperatingSystem.IsMacOS()?OpenDarwin(root,relative,true):null;
-                string source=handle!=null?"/dev/fd/"+handle.DangerousGetHandle().ToInt32():Path.Combine(root,relative);
-                using var iterator=Directory.EnumerateFileSystemEntries(source,"*",new EnumerationOptions{AttributesToSkip=0,IgnoreInaccessible=false,ReturnSpecialDirectories=false}).GetEnumerator();
-                while(iterator.MoveNext())names.Add(Path.GetFileName(iterator.Current));
+                if(OperatingSystem.IsMacOS()) {
+                    using var handle=OpenDarwin(root,relative,true);
+                    ReadDarwinNames(handle,names);
+                } else {
+                    using var iterator=Directory.EnumerateFileSystemEntries(Path.Combine(root,relative),"*",new EnumerationOptions{AttributesToSkip=0,IgnoreInaccessible=false,ReturnSpecialDirectories=false}).GetEnumerator();
+                    while(iterator.MoveNext())names.Add(Path.GetFileName(iterator.Current));
+                }
             });
         }catch(Exception ex) when(IsSourceError(ex)){verify();enumerationError=ex;}
         names.Sort(StringComparer.Ordinal);
@@ -161,6 +164,41 @@ internal sealed class MacMountedSource : DiscSource
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="open",SetLastError=true)] private static extern int NativeOpen([MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="openat",SetLastError=true)] private static extern int NativeOpenAt(int fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="fgetxattr",SetLastError=true)] private static extern nint FGetXattr(SafeFileHandle fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,byte[] data,nuint length,uint position,int options);
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="dup",SetLastError=true)] private static extern int DuplicateFd(int fd);
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="fdopendir",SetLastError=true)] private static extern IntPtr FdOpenDir(int fd);
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="closedir")] private static extern int CloseDir(IntPtr directory);
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="__error")] private static extern IntPtr ErrorPointer();
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="readdir")] private static extern IntPtr ReadDir(IntPtr directory);
+    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="readdir$INODE64")] private static extern IntPtr ReadDirInode64(IntPtr directory);
+    private static void ReadDarwinNames(SafeFileHandle handle,List<string> names)
+    {
+        int fd=DuplicateFd(handle.DangerousGetHandle().ToInt32());
+        if(fd<0)throw new IOException("无法复制目录读取句柄（errno "+Marshal.GetLastWin32Error()+"）。");
+        using var duplicate=new SafeFileHandle((IntPtr)fd,true);
+        IntPtr directory=FdOpenDir(fd);
+        if(directory==IntPtr.Zero)throw new IOException("无法遍历已打开目录（errno "+Marshal.GetLastWin32Error()+"）。");
+        duplicate.SetHandleAsInvalid(); // fdopendir owns this descriptor now.
+        try {
+            IntPtr error=ErrorPointer();
+            var utf8=new UTF8Encoding(false,true);
+            while(true) {
+                Marshal.WriteInt32(error,0);
+                // Darwin x64 needs the modern inode64 symbol; arm64 uses it
+                // without a suffix. Both have Apple's __DARWIN_STRUCT_DIRENTRY
+                // layout: reclen@16, namlen@18, type@20, UTF-8 name@21.
+                IntPtr entry=RuntimeInformation.ProcessArchitecture==Architecture.X64?ReadDirInode64(directory):ReadDir(directory);
+                if(entry==IntPtr.Zero) {int code=Marshal.ReadInt32(error);if(code!=0)throw new IOException("目录遍历中断（errno "+code+"）。");break;}
+                int record=(ushort)Marshal.ReadInt16(entry,16),length=(ushort)Marshal.ReadInt16(entry,18);
+                if(length<1||length>1023||record<22+length)throw new IOException("系统目录条目边界无效。");
+                byte[] bytes=new byte[length];Marshal.Copy(IntPtr.Add(entry,21),bytes,0,length);
+                string name;
+                try{name=utf8.GetString(bytes);}catch(DecoderFallbackException ex){throw new IOException("目录含无法无损表示的UTF-8名称。",ex);}
+                if(name=="."||name=="..")continue;
+                if(name.IndexOf('\0')>=0||name.IndexOf('/')>=0)throw new IOException("系统目录条目名称无效。");
+                names.Add(name);
+            }
+        }finally{CloseDir(directory);}
+    }
     private static SafeFileHandle OpenDarwin(string root,string relative,bool directory)
     {
         int start=NativeOpen(root,NoFollow|DirectoryFlag|CloseOnExec|NonBlock);

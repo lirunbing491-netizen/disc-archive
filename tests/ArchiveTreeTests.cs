@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -52,14 +52,14 @@ internal static class ArchiveTreeTests
                 ArchiveItem day=Item(1,"Day",-1,true);day.Path="Photos\\Day";ArchiveItem photo=Item(2,"Photos",-1,true);photo.Path="Photos";
                 ArchiveDiscSource source=Source(root,new[]{file,day,photo},"Photos","ISO9660");
                 Assert(Entries(source,root).Count==1 && Files(source,root).Count==1,"ISO implicit directories duplicated");
-                string path=Files(source,root)[0];Assert(path.EndsWith("Photos\\Day\\file.txt"),"ISO hierarchy flattened");
+                string path=Files(source,root)[0];Assert(path==Path.Combine(root,"Photos","Day","file.txt"),"ISO hierarchy flattened");
                 Assert(Copy(source,root,"iso").Files==1,"ISO copy workflow");
             });
             Test("case and NFC conflicts plus unsafe names preserve every independent item",delegate{
                 string root=Root();string[] names={"A.txt","a.txt","café.txt","cafe\u0301.txt","CON","con.txt","..","../escape","x\u0001y","x:y","x\\y","tail.","tail ","~DiscArchive-preserved",new string('z',400)};
                 List<ArchiveItem> items=new List<ArchiveItem>();for(int i=0;i<names.Length;i++)items.Add(Item(i,names[i],-1));
                 ArchiveDiscSource source=Source(root,items,"","HFS+");List<string> files=Files(source,root);HashSet<string> canonical=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach(string file in files){Assert(file.StartsWith(root+"\\",StringComparison.OrdinalIgnoreCase),"source escape");Assert(canonical.Add(file.Normalize(NormalizationForm.FormC)),"canonical collision");}
+                foreach(string file in files){Assert(file.StartsWith(root+Path.DirectorySeparatorChar,StringComparison.Ordinal),"source escape");Assert(canonical.Add(file.Normalize(NormalizationForm.FormC)),"canonical collision");}
                 Assert(files.Count==names.Length,"items silently dropped");RescueResult result=Copy(source,root,"unsafe");Assert(result.Files==names.Length && result.Failed==0,"safe exports lost");
                 string reports=Path.Combine(work,"mapping");source.WriteDescription(reports);string[] descriptions=Directory.GetFiles(reports,"*.tsv");Assert(descriptions.Length==1,"mapping missing");
                 string text=File.ReadAllText(descriptions[0]);Assert(text.Contains("~device-CON") && text.Contains("~item-1") && text.Contains("\\u0001"),"mapping lacks escapes/conflicts/original metadata");
@@ -69,7 +69,7 @@ internal static class ArchiveTreeTests
                 string root=Root();ArchiveItem file=Item(0,"photo.jpg",-1),stream=Item(1,"rsrc",0),aux=Item(2,"FinderInfo",0),ordinary=Item(3,"._photo.jpg",-1),colon=Item(4,"photo.jpg:rsrc",-1);
                 stream.IsAltStream=true;stream.ParentIsAltStream=true;aux.IsAux=true;
                 ArchiveDiscSource source=Source(root,new[]{file,stream,aux,ordinary,colon},"","HFS+");List<string> files=Files(source,root);Assert(files.Count==5,"fork discarded");int sidecars=0;
-                foreach(string path in files)if(path.Contains("~DiscArchive-preserved\\"))sidecars++;
+                foreach(string path in files)if(path.Contains("~DiscArchive-preserved"+Path.DirectorySeparatorChar))sidecars++;
                 Assert(sidecars==2,"filename heuristics misclassified ordinary files or forks");RescueResult result=Copy(source,root,"forks");Assert(result.Files==5 && result.Failed==0,"fork bytes not copied");
                 Assert(File.ReadAllBytes(Directory.GetFiles(Path.Combine(work,"forks","Project"),"photo.jpg",SearchOption.AllDirectories)[0])[0]==0,"main fork changed");
                 source.WriteDescription(Path.Combine(work,"fork-mapping"));string text=File.ReadAllText(Directory.GetFiles(Path.Combine(work,"fork-mapping"),"*.tsv")[0]);Assert(text.Contains("rsrc") && text.Contains("True"),"sidecar association missing");

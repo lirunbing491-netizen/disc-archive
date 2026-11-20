@@ -27,8 +27,7 @@ namespace DiscArchive
                 token.ThrowIfCancellationRequested();
                 try { acquired=new FileStream(gate,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None); }
                 catch(IOException ex) {
-                    int code=ex.HResult&65535;
-                    if(code!=32 && code!=33)throw;
+                    if(!ArchivePath.IsSharingViolation(ex))throw;
                     token.WaitHandle.WaitOne(70);
                 }
             }
@@ -47,7 +46,7 @@ namespace DiscArchive
             Catalog.CheckNoLinks(lockFile);
             try { handle=new FileStream(lockFile,FileMode.OpenOrCreate,FileAccess.ReadWrite,FileShare.None); }
             catch(IOException e) {
-                if((e.HResult&65535)==32 || (e.HResult&65535)==33)
+                if(ArchivePath.IsSharingViolation(e))
                     throw new IOException("另一台光驱或工位正在处理原盘号 "+canonical+"。请等该任务结束后再续导。",e);
                 throw;
             }
