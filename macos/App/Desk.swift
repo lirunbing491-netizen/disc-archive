@@ -11,9 +11,14 @@ private struct DeskDrive {
 }
 private struct DeskSubmission {
     var drive: DeskDrive, target: String, targetDeviceId: String?, project: String, existingProject: String?, mode: String, view: String, resumeId: String?
+    // Archive marker GUID survives renaming/remounting. This is separate from the current OS device identity.
+    var archiveTargetId: String? = nil
+    // Set only after the explicit original-disc sheet and a matching fresh device observation.
+    // The worker must independently bind its full token; ordinary mediaHint never authorizes reading.
+    var resumeConfirmedHint: String? = nil
     var payload: IPCObject {
         var o: IPCObject = ["drive": drive.id, "target": target, "project": project, "emptyAtShutter": drive.empty, "mode": mode, "view": view, "mediaHint": drive.mediaHint]
-        if let id = targetDeviceId { o["targetDeviceId"] = id }; if let existing = existingProject { o["existingProject"] = existing }; if let resume = resumeId { o["resumeId"] = resume }; return o
+        if let id = targetDeviceId { o["targetDeviceId"] = id }; if let id = archiveTargetId { o["targetId"] = id }; if let hint = resumeConfirmedHint, !hint.isEmpty { o["resumeConfirmedHint"] = hint }; if let existing = existingProject { o["existingProject"] = existing }; if let resume = resumeId { o["resumeId"] = resume }; return o
     }
 }
 private final class DeskTask {
@@ -265,7 +270,9 @@ private final class DeskMenuAction: NSObject {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("DiscArchivePhotos", isDirectory: true).standardizedFileURL.path + "/"
             if ownTemporary, sourcePhoto.standardizedFileURL.path.hasPrefix(root), sourcePhoto.pathExtension.lowercased() == "jpg" { do { try FileManager.default.removeItem(at: sourcePhoto) } catch { task.log += "登记成功，但临时照片清理失败；已保留：\(sourcePhoto.path)\n" } }
             refreshCatalog()
-        case "status": task.status = o["text"] as? String ?? "处理中…"
+        case "status":
+            task.status = o["text"] as? String ?? "处理中…"
+            if task.submission.resumeId != nil && task.status.contains("核对") && task.status.contains("确认") { task.status += "\n请在主窗口再次核对原盘，然后点“已核对所选盘，继续”；此前尚未开始读取。" }
         case "recognize":
             guard let path = o["photo"] as? String else { task.process?.send(["action": "recognition", "text": "", "error": "未提供照片路径"]); break }
             // VisionPane is a single cancellable operation. Serialize OCR/model requests across drives.
@@ -434,6 +441,19 @@ private final class DeskMenuAction: NSObject {
         guard let task = jobs[selectedDrive], task.process == nil, isRetryable(task.entry), let entry = task.entry else { return }
         confirmResume(entry, expectedTask: task)
     }
+    private static func resumeTarget(_ submission: DeskSubmission, entry: IPCObject) throws -> DeskSubmission {
+        var frozen = submission
+        let marker = (entry["TargetId"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !marker.isEmpty {
+            // Host.TargetMarker verifies the GUID at the newly selected path; ResumeKnown
+            // verifies that this archive is the original one. Never send the OS device ID here.
+            frozen.archiveTargetId = marker
+        } else {
+            let original = entry["TargetRoot"] as? String ?? ""
+            guard !original.isEmpty, URL(fileURLWithPath: original).standardizedFileURL.path == URL(fileURLWithPath: frozen.target).standardizedFileURL.path else { throw CaptureFailure("这条旧登记没有归档身份标记，请选择原归档目录：\(original)。不会仅凭新路径认定为原备份位置。") }
+        }
+        return frozen
+    }
     private func confirmResume(_ entry: IPCObject, expectedTask: DeskTask?) {
         guard !retryChecking, !closing, let id = entry["Id"] as? String, let photo = entry["Photo"] as? String, !photo.isEmpty else { notice("没有可复用的原照片，请查看回执。"); return }
         if let current = entries.first(where: { $0["Id"] as? String == id }), current["HiddenFromCatalog"] as? Bool == true || current["ManualOnly"] as? Bool == true { notice("此登记已移除或为手工项，不能导盘。"); return }
@@ -445,13 +465,11 @@ private final class DeskMenuAction: NSObject {
         // A catalog refresh, drive switch, or replacement task cannot redirect this callback.
         let previousCheck = manualCheck.state; manualCheck.state = .on
         let frozen: DeskSubmission
-        do { frozen = try snapshot(resume: id) } catch { manualCheck.state = previousCheck; notice(error.localizedDescription); return }
+        do { frozen = try Self.resumeTarget(snapshot(resume: id), entry: entry) } catch { manualCheck.state = previousCheck; notice(error.localizedDescription); return }
         manualCheck.state = previousCheck
-        let target = entry["TargetRoot"] as? String ?? ""
-        guard !target.isEmpty, target == frozen.target else { notice("请先在导盘页选择原归档目录：\(target)。续导沿用原盘号和照片。"); return }
         retryChecking = true; showSelectedTask()
         let alert = NSAlert(); alert.messageText = "以原盘号核对/续导 \(id)"
-        alert.informativeText = "将保留当前所选光驱 \(drive.name)。请确认其中实物确实为原盘 \(id)，与原照片一致。沿用原登记与回执，检查完整文件并重新读取未完成项，无需重拍。如果已经换盘，请取消并重新登记。"; alert.addButton(withTitle: "已核对原盘，续导"); alert.addButton(withTitle: "取消")
+        alert.informativeText = "将保留当前所选光驱 \(drive.name)。请确认其中实物确实为原盘 \(id)，与原照片一致。沿用原登记与回执，检查完整文件并重新读取未完成项，无需重拍。如果已经换盘，请取消并重新登记。\n归档组件会独立核对盘片，原盘一致便开始读取；若介质变化或证据不足，主窗口会提示再次核对并点“已核对所选盘，继续”。"; alert.addButton(withTitle: "已核对原盘，续导"); alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] r in
             guard let self = self else { return }; self.retryChecking = false; self.showSelectedTask()
             guard r == .alertFirstButtonReturn, !self.closing, self.selectedDrive == driveID, self.jobs[driveID]?.process == nil else { return }
@@ -463,7 +481,11 @@ private final class DeskMenuAction: NSObject {
                 guard case .success(let o) = result,
                       let current = (o["drives"] as? [IPCObject] ?? []).map(DeskDrive.init).first(where: { $0.id == driveID }), current.ready, !current.empty, current.mediaHint == frozen.drive.mediaHint else { self.notice("确认期间光驱或盘片状态变化，请重新核对后再试；原照片保留。"); return }
                 self.drives = (o["drives"] as? [IPCObject] ?? []).map(DeskDrive.init); self.targets = o["targets"] as? [IPCObject] ?? []
-                self.tabs.selectTabViewItem(at: 0); self.start(photo: URL(fileURLWithPath: photo), submission: frozen, ownTemporary: false)
+                // This branch is reachable only after the original-disc sheet was accepted
+                // and a second device query still observed the same medium. Never infer it in snapshot/payload.
+                var confirmed = frozen
+                if !current.mediaHint.isEmpty { confirmed.resumeConfirmedHint = current.mediaHint }
+                self.tabs.selectTabViewItem(at: 0); self.start(photo: URL(fileURLWithPath: photo), submission: confirmed, ownTemporary: false)
             }
         }
     }
@@ -528,6 +550,20 @@ private final class DeskMenuAction: NSObject {
                 showHidden.state = .off; search.stringValue = ""; filterCatalog(); try require(filtered.count == 1, "恢复项未回到正常列表。")
                 let fakeDrive = DeskDrive(["id": "ui-check-drive", "name": "虚拟自查光驱"])
                 let submission = DeskSubmission(drive: fakeDrive, target: MacBundle.state.path, targetDeviceId: nil, project: "", existingProject: nil, mode: "metadata", view: "auto", resumeId: nil)
+                try require(submission.payload["resumeConfirmedHint"] == nil, "普通照片错误产生一次性原盘确认。")
+                var unconfirmedResume = submission; unconfirmedResume.resumeId = "ui-check-original"
+                try require(unconfirmedResume.payload["resumeConfirmedHint"] == nil, "未经确认的续导错误产生一次性原盘确认。")
+                unconfirmedResume.drive = DeskDrive(["id": fakeDrive.id, "token": "observation-session:ordinary-media-hint"])
+                try require(unconfirmedResume.payload["mediaHint"] as? String == "ordinary-media-hint" && unconfirmedResume.payload["resumeConfirmedHint"] == nil, "普通介质观察被错误当作确认授权。")
+                var moved = submission; moved.target = "/Volumes/RenamedBackup/Archive"; moved.targetDeviceId = "os-device-not-an-archive-guid"
+                let marker = "0123456789abcdef0123456789abcdef"
+                let movedResume = try Self.resumeTarget(moved, entry: ["TargetRoot": "/Volumes/OldBackup/Archive", "TargetId": marker])
+                try require(movedResume.target == moved.target && movedResume.payload["targetId"] as? String == marker && movedResume.payload["targetDeviceId"] as? String == moved.targetDeviceId, "改卷名续导丢失归档GUID或混用了设备身份。")
+                let legacy = try Self.resumeTarget(submission, entry: ["TargetRoot": submission.target])
+                try require(legacy.payload["targetId"] == nil, "无GUID旧记录错误采用了设备身份。")
+                var rejectedMovedLegacy = false
+                do { _ = try Self.resumeTarget(moved, entry: ["TargetRoot": "/Volumes/OldBackup/Archive"]) } catch { rejectedMovedLegacy = true }
+                try require(rejectedMovedLegacy, "无GUID旧记录被允许静默改归档路径。")
                 let old = DeskTask(submission), replacement = DeskTask(submission); old.entry = entry; replacement.entry = entry
                 jobs[fakeDrive.id] = replacement
                 defer { jobs.removeValue(forKey: fakeDrive.id) }
@@ -555,7 +591,7 @@ private final class DeskMenuAction: NSObject {
                 retryEntry["Status"] = "部分拷出"; retryEntry["HiddenFromCatalog"] = true; replacement.entry = retryEntry
                 try require(notificationCategory(for: replacement).isEmpty, "已移除任务错误提供通知重试。")
                 try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "ui-check-original", action: "unknown-action") == nil && selectedDrive == previousDrive, "未知动作被接受或通知门禁改变当前驱动。")
-                completion(.success("PASS packaged AppKit catalog: manual add, count, duplicate title folding, label edit, ID search, local hide/restore; notification default/retry category and stale-task/drive/entry/action guards (synthetic routing only)"))
+                completion(.success("PASS packaged AppKit catalog: manual add, count, duplicate title folding, label edit, ID search, local hide/restore; resume archive GUID versus OS device identity and legacy path policy; notification default/retry category and stale-task/drive/entry/action guards (synthetic routing only)"))
             } catch { completion(.failure(error)) }
         }
     }

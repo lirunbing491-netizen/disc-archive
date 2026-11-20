@@ -15,7 +15,7 @@ namespace DiscArchive;
 internal sealed class HostRequest
 {
     public string photo="",target="",targetId="",targetDeviceId="",drive="",project="",existingProject="",mode="metadata",view="auto",resumeId="",driveToken="",mediaHint="";
-    public string path="",id="",title="";
+    public string path="",id="",title="",resumeConfirmedHint="";
     public bool emptyAtShutter,hidden;
 }
 internal sealed class HostControl
@@ -156,6 +156,13 @@ internal sealed class Host
         int separator=(initialDrive.token??"").IndexOf(':');
         bool changedSinceShutter=!string.IsNullOrEmpty(request.mediaHint)&&separator>=0&&
             !String.Equals(initialDrive.token.Substring(separator+1),request.mediaHint,StringComparison.Ordinal);
+        bool resuming=!string.IsNullOrEmpty(request.resumeId);
+        // Only the explicit resume confirmation may refer to a previously seen
+        // medium. Ordinary shutter hints remain informational. Bind a token
+        // from this worker, which also guards every subsequent open and read.
+        bool acknowledged=resuming && initialDrive.ready && !initialDrive.empty && separator>=0 &&
+            !String.IsNullOrEmpty(request.resumeConfirmedHint) &&
+            initialDrive.token.Substring(separator+1)==request.resumeConfirmedHint;
         ValidateTarget(request.target,initial);ValidateTargetDevice(request,initial);
         if(string.IsNullOrEmpty(request.resumeId)&&(!Path.IsPathFullyQualified(request.photo)||!File.Exists(request.photo)))throw new IOException("登记照片不存在。");
         IReader native=createReader();if(native is MacReader mac)mac.View=MacReader.ParseView(request.view);
@@ -191,7 +198,12 @@ internal sealed class Host
                 :station.ResumeKnown(request.target,request.resumeId,request.drive);
             Emit(new{@event="registered",id=registered.Id,photo=registered.Photo,drive=registered.Drive,targetId=registered.TargetId});
             registrationPublished.TrySetResult(true);
-            Status(empty?"登记已保留，等待放入光盘。":"登记已保留，请核对当前光盘并确认开始。");
+            if(acknowledged) {
+                var now=reader.Current();
+                acknowledged=now!=null && now.ready && !now.empty && now.token==initialDrive.token;
+                if(acknowledged)reader.Expected=now.token;
+            }
+            Status(acknowledged?"已核对原盘，准备续导。":resuming?"请核对所选光驱里的原盘并确认继续。":empty?"登记已保留，等待放入光盘。":"登记已保留，请核对当前光盘并确认开始。");
             if(changedSinceShutter)Status("拍照时的介质观察与当前不同，请核对盘面照片和光盘。");
         }
         catch
@@ -206,7 +218,7 @@ internal sealed class Host
         int parent=OperatingSystem.IsMacOS()?getppid():0;
         if(parent>1)_=WatchParent(parent,controls.Writer,lifetime.Token);
         Task<Entry> copying=null;
-        bool canceled=false,confirmed=false;
+        bool canceled=false,confirmed=acknowledged;
         string lastState="";
         try
         {
@@ -243,7 +255,7 @@ internal sealed class Host
                 {
                     var current=reader.Current();string state=current==null?"disconnected":current.empty?"empty":current.ready?"ready":"waiting";
                     if(state!=lastState){if(state=="disconnected")Status("所选光驱已断开，等待重新连接。 ");else if(state=="empty")Status("已检测到空托盘，等待放盘。 ");lastState=state;}
-                    bool can=await station.CanStart(confirmed);
+                    bool can=(!resuming || confirmed) && await station.CanStart(confirmed);
                     if(can)
                     {
                         MacInventory startInventory=snapshot();ValidateTarget(request.target,startInventory);ValidateTargetDevice(request,startInventory);

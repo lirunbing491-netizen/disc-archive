@@ -65,7 +65,15 @@ internal static class HostProtocolTests
         var host=new Host(input,output,Path.Combine(area,"state"),()=>device,device.Snapshot,id=>"synthetic inspection");
         string target=Path.Combine(area,"backup");Directory.CreateDirectory(target);string photo=Path.Combine(area,"photo.bin");File.WriteAllText(photo,"full-photo");
         if(name.StartsWith("target-device",StringComparison.Ordinal))device.TargetPath=target;
-        input.Send(new HostRequest{photo=photo,target=target,targetDeviceId=name.StartsWith("target-device",StringComparison.Ordinal)?"12345":"",drive="test-optical",project=name=="project-retry"?"240102-Client":"240102-Test",emptyAtShutter=true,driveToken="foreign-ui-token",mediaHint="ui-old-media",mode=name.StartsWith("recognition",StringComparison.Ordinal)?"ocr":"metadata"});
+        var request=new HostRequest{photo=photo,target=target,targetDeviceId=name.StartsWith("target-device",StringComparison.Ordinal)?"12345":"",drive="test-optical",project=name=="project-retry"?"240102-Client":"240102-Test",emptyAtShutter=true,driveToken="foreign-ui-token",mediaHint="ui-old-media",mode=name.StartsWith("recognition",StringComparison.Ordinal)?"ocr":"metadata"};
+        if(name.StartsWith("resume-confirm-",StringComparison.Ordinal)) {
+            var book=new Catalog(Path.Combine(area,"state"));
+            var prior=book.Create(photo,target,"test-optical",request.project);
+            prior.Status=Workstation.Partial; book.Save(prior);
+            request.resumeId=prior.Id;request.targetId=prior.TargetId;
+            request.mediaHint=request.resumeConfirmedHint=name.EndsWith("-same",StringComparison.Ordinal)?"provider:disc-A":"provider:changed";
+        }
+        input.Send(request);
         await test(host,device,input,output);
     }
     private static async Task OneShotReplies(string root)
@@ -94,6 +102,17 @@ internal static class HostProtocolTests
         string root=Path.Combine(Path.GetTempPath(),"discarchive-protocol-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         PortableSupport.ThumbnailForTests=s=>new byte[]{255,216,255,217};
         await OneShotReplies(root);
+        await Case(root,"resume-confirm-same",async(host,device,input,output)=>{
+            var job=host.Run("job");await output.Event("registered");var result=await output.Event("result");
+            Check(result.GetProperty("entry").GetProperty("Status").GetString()==Workstation.Done && await job==0 && device.Opens==1,"explicitly confirmed unchanged original medium resumes once without an extra click");
+        });
+        await Case(root,"resume-confirm-changed",async(host,device,input,output)=>{
+            var job=host.Run("job");await output.Event("registered");
+            device.EmptyTray=true;device.ReadyFlag=false;await Task.Delay(320);
+            device.Token="worker-process:provider:disc-B";device.EmptyTray=false;device.ReadyFlag=true;await Task.Delay(550);
+            Check(device.Opens==0,"stale original-disc confirmation cannot start a replaced disc even after an empty tray");
+            input.Send(new{action="cancel"});await job;
+        });
         await Case(root,"confirm",async(host,device,input,output)=>{
             string area=Path.GetDirectoryName(device.Source);
             var book=new Catalog(Path.Combine(area,"state"));
