@@ -27,5 +27,26 @@ delivery="$out/distribution"
 mkdir "$delivery"
 ditto "$app" "$delivery/DiscArchive.app"
 cp "$app/Contents/Resources/使用说明.txt" "$delivery/"
-(cd "$delivery" && /usr/bin/ditto -c -k . "$out/DiscArchive-macOS-Universal.zip")
+(cd "$delivery" && /usr/bin/ditto -c -k . "$out/ditto.zip")
+# ditto writes UTF-8 entry names without the ZIP language-encoding bit.
+# Keep its permissions, symlinks and metadata, and encode names unambiguously
+# for both Finder and ZIP readers on other platforms.
+python3 - "$out/ditto.zip" "$out/DiscArchive-macOS-Universal.zip" <<'PY'
+from copy import copy
+from zipfile import ZipFile
+import sys
+with ZipFile(sys.argv[1]) as source, ZipFile(sys.argv[2], "x") as target:
+    target.comment = source.comment
+    for original in source.infolist():
+        info = copy(original)
+        if not (info.flag_bits & 0x800) and not info.filename.isascii():
+            info.filename = info.filename.encode("cp437").decode("utf-8")
+        target.writestr(info, source.read(original))
+PY
+unpacked="$(mktemp -d "$out/verify-zip.XXXXXXXX")"
+ditto -x -k "$out/DiscArchive-macOS-Universal.zip" "$unpacked"
+cmp "$unpacked/使用说明.txt" "$app/Contents/Resources/使用说明.txt"
+cmp "$unpacked/DiscArchive.app/Contents/Resources/使用说明.txt" "$unpacked/使用说明.txt"
+codesign --verify --deep --strict "$unpacked/DiscArchive.app"
+"$unpacked/DiscArchive.app/Contents/MacOS/DiscArchive" --check-package
 (cd "$out" && shasum -a 256 DiscArchive-macOS-Universal.zip > SHA256.txt)
