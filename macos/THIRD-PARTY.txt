@@ -1,0 +1,20 @@
+DiscArchive uses the MIT license. See LICENSE-DiscArchive in the app resources
+or LICENSE at the repository root.
+
+7-Zip 26.06, copyright Igor Pavlov and contributors
+The application dynamically loads the bundled Unix 7z.so. Source, notices and
+license terms accompany the app in Contents/Resources. See LICENSE-7zip.txt,
+COPYING-LGPL-2.1.txt, unRarLicense.txt and 7z2606-src.7z. The original license
+includes specific terms for certain files including unRAR code.
+The bridge is built from macos/Archive/native/discarchive7z.cpp. To rebuild the
+library or replace it with a modified one, follow macos/Archive/README.md and
+use macos/Archive/build-native.sh with the desired source tree. The outputs
+belong in Contents/Helpers/<architecture>/native. Re-sign a locally modified
+bundle before running it. The sources for the scripts and bridge are available
+in the same public source tree as the app.
+
+.NET runtime 8, copyright .NET Foundation and contributors
+The app contains the self-contained Microsoft.NETCore.App runtime for the
+architecture selected at startup. See dotnet-LICENSE.txt and
+dotnet-ThirdPartyNotices.txt for the license and third-party attributions.
+Runtime source and build documentation: https://github.com/dotnet/runtime

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+  <key>CFBundleExecutable</key><string>DiscArchive</string>
+  <key>CFBundleIdentifier</key><string>com.discarchive.mac</string>
+  <key>CFBundleName</key><string>导盘助手</string>
+  <key>CFBundleDisplayName</key><string>导盘助手</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.4.1</string>
+  <key>CFBundleVersion</key><string>40101</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>打开所选摄像头预览并拍摄盘面，将照片与当前光驱中的光盘一起归档。</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>读取所选光盘，并将素材、盘面照片和记录存入你选择的备份硬盘。</string>
+  <key>NSHumanReadableCopyright</key><string>DiscArchive contributors · MIT</string>
+</dict></plist>

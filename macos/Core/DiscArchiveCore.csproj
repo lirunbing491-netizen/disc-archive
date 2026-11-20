@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <DefineConstants>$(DefineConstants);MAC_PORT</DefineConstants>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <AssemblyName>discarchive-core</AssemblyName>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Catalog.cs" Link="Shared/Catalog.cs" />
+    <Compile Include="../../src/Workstation.cs" Link="Shared/Workstation.cs" />
+    <Compile Include="../../src/DiscSource.cs" Link="Shared/DiscSource.cs" />
+    <Compile Include="../../src/DiscIdentity.cs" Link="Shared/DiscIdentity.cs" />
+    <Compile Include="../../src/RescueCopy.cs" Link="Shared/RescueCopy.cs" />
+    <Compile Include="../../src/ContinuationJournal.cs" Link="Shared/ContinuationJournal.cs" />
+    <Compile Include="../../src/DiscSession.cs" Link="Shared/DiscSession.cs" />
+    <Compile Include="../../src/ProjectAliases.cs" Link="Shared/ProjectAliases.cs" />
+    <Compile Include="../../src/DiscPlan.cs" Link="Shared/DiscPlan.cs" />
+    <Compile Include="../../src/ProjectPhoto.cs" Link="Shared/ProjectPhoto.cs" />
+    <Compile Include="../../src/CameraFileDate.cs" Link="Shared/CameraFileDate.cs" />
+    <Compile Include="../../src/OpticalMount.cs" Link="Shared/OpticalMount.cs" />
+    <Compile Include="../../src/OpticalLayout.cs" Link="Shared/OpticalLayout.cs" />
+    <Compile Include="../../src/HfsCatalogGuard.cs" Link="Shared/HfsCatalogGuard.cs" />
+    <Compile Include="../../src/ArchiveDiscSource.cs" Link="Shared/ArchiveDiscSource.cs" />
+  </ItemGroup>
+</Project>

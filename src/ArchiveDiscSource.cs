@@ -21,7 +21,7 @@ namespace DiscArchive
             internal readonly Dictionary<string,Node> RawChildren = new Dictionary<string,Node>(StringComparer.Ordinal);
             internal readonly HashSet<string> Names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
-        private readonly Dictionary<string,Node> nodes = new Dictionary<string,Node>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string,Node> nodes = new Dictionary<string,Node>(ArchivePath.Comparer);
         private readonly Dictionary<int,Node> byIndex = new Dictionary<int,Node>();
         private readonly Dictionary<int,ArchiveItem> items = new Dictionary<int,ArchiveItem>();
         private readonly HashSet<int> building = new HashSet<int>();
@@ -151,7 +151,7 @@ namespace DiscArchive
             if(!building.Add(item.Index))throw new InvalidDataException("文件系统父子关系成环，不能安全建立目录。");
             Node parent=root;string name=item.Name;string problem=ItemProblem(item);
             bool auxiliary=item.IsAltStream || item.ParentIsAltStream || item.IsAux;
-            bool rawTree=format.StartsWith("HFS",StringComparison.OrdinalIgnoreCase) || format.StartsWith("APFS",StringComparison.OrdinalIgnoreCase);
+            bool rawTree=format.StartsWith("HFS",StringComparison.OrdinalIgnoreCase) || format.StartsWith("APFS",StringComparison.OrdinalIgnoreCase) || format=="POSIX";
             string parentProblem=ParentProblem(item);
             problem=Join(problem,parentProblem);
             if(auxiliary)

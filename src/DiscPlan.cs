@@ -11,7 +11,7 @@ namespace DiscArchive
     {
         public string Folder, Reason;
         // Keys are original top-level names; values are safe destination project folders.
-        public Dictionary<string,string> TopFolders = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string,string> TopFolders = new Dictionary<string,string>(ArchivePath.Comparer);
         private sealed class Hint { public DateTime? Day; public string Name; public string Source; }
         private sealed class Sample { public string Path; public DateTime Modified; }
         private sealed class Evidence

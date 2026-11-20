@@ -41,7 +41,7 @@ namespace DiscArchive
         {
             private const string Coordination = ".discarchive-coordination-v1";
             private readonly string source, target, fallback, attempt, disc;
-            private readonly Dictionary<string, string> mapping = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            private readonly Dictionary<string, string> mapping = new Dictionary<string, string>(ArchivePath.Comparer);
             private readonly Dictionary<string, string> origins = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             private readonly Action<string> progress;
             private readonly Action verify;
@@ -181,6 +181,10 @@ namespace DiscArchive
                 // Claims survive cancellation/crashes: an incomplete old tree must never acquire
                 // another disc's files. A retry gets a fresh origin instead of reclaiming it.
                 string key = Path.GetFullPath(path).Substring(target.Length).ToUpperInvariant();
+#if MAC_PORT
+                // Match the existing Windows claim filenames on the same backup disk.
+                key=key.Replace('/', '\\');
+#endif
                 // Use a relative key so different drive mappings of the same share agree.
                 byte[] digest;
                 using (SHA256 hash = SHA256.Create()) digest = hash.ComputeHash(Encoding.UTF8.GetBytes(key));
@@ -207,7 +211,7 @@ namespace DiscArchive
                 while (Within(source, current))
                 {
                     if ((media.Attributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("拒绝来源重解析点：" + current);
-                    if (String.Equals(Full(current), source, StringComparison.OrdinalIgnoreCase)) break;
+                    if (String.Equals(Full(current), source, ArchivePath.Comparison)) break;
                     current = Path.GetDirectoryName(current);
                 }
             }
@@ -457,7 +461,7 @@ namespace DiscArchive
         private static StreamWriter Writer(string path) { StreamWriter w = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read), new UTF8Encoding(true)); w.AutoFlush = true; return w; }
         private static bool SourceError(Exception e) { return e is IOException || e is UnauthorizedAccessException || e is System.Security.SecurityException; }
         private static string Full(string value) { return Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; }
-        private static bool Within(string parent, string child) { return Full(child).StartsWith(Full(parent), StringComparison.OrdinalIgnoreCase); }
+        private static bool Within(string parent, string child) { return Full(child).StartsWith(Full(parent), ArchivePath.Comparison); }
         private static bool Exists(string p) { return File.Exists(p) || Directory.Exists(p); }
         private static string E(string s) { return (s ?? "").Replace("\\", "\\\\").Replace("\t", "\\t").Replace("\r", "\\r").Replace("\n", "\\n"); }
         private static void Name(string name)

@@ -2,6 +2,9 @@
 /dist/
 /bin/
 /obj/
+macos/**/bin/
+macos/**/obj/
+macos/**/.build/
 /test-output/
 *.user
 *.suo

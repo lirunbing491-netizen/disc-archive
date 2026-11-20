@@ -6,6 +6,13 @@ LICENSE text eol=lf
 *.zip binary
 *.dll binary
 *.7z binary
+*.swift text eol=lf
+*.m text eol=lf
+*.h text eol=lf
+*.cpp text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.plist text eol=lf
 vendor/7zip/LICENSE-7zip.txt -text -diff
 vendor/7zip/COPYING-LGPL-2.1.txt -text -diff
 vendor/7zip/unRarLicense.txt -text -diff

@@ -28,6 +28,8 @@ namespace DiscArchive
         { Root=root; VolumeLabel=label; Verify=verify; lease=guard; Source=source??DiscSource.Windows; Format=format; }
         public void Dispose() { if(lease!=null) lease.Dispose(); }
     }
+
+#if !MAC_PORT
     internal sealed class SystemReader : IReader
     {
         public string[] Drives() { return Optical.Drives(); }
@@ -73,6 +75,8 @@ namespace DiscArchive
         }
     }
 
+
+#endif
     internal sealed class Workstation
     {
         internal const string Waiting = "等待放盘", Planning = "正在归类", Running = "抢救中", Done = "已拷出", Partial = "部分拷出", Paused="暂停待续", Review = "待复查";
@@ -306,7 +310,7 @@ namespace DiscArchive
                             try { fallback=disc.Source.Entries(disc.Root).Any(p=>!plan.TopFolders.ContainsKey(Path.GetFileName(p))); }
                             catch(IOException) { fallback=true; } catch(UnauthorizedAccessException) { fallback=true; }
                         }
-                        return plan.TopFolders.Values.Concat(fallback ? new[]{plan.Folder} : new string[0]).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                        return plan.TopFolders.Values.Concat(fallback ? new[]{plan.Folder} : new string[0]).Distinct(ArchivePath.Comparer).ToArray();
                     });
                     e.Project=String.Join(" / ",e.ArchiveFolders);
                     if(e.TitleState!="已确认") { e.Title=e.Project; e.TitleState="自动命名"; }
@@ -409,13 +413,13 @@ namespace DiscArchive
                 verify();
                 return DiscPlan.Decide(disc.Root,e.DiscLabel,e.PhotoText,manual ? "" : e.ProjectHint,e.Id,DateTime.Today,token,disc.Source);
             });
-            var resolved=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
-            var names=plan.TopFolders.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var resolved=new Dictionary<string,string>(ArchivePath.Comparer);
+            var names=plan.TopFolders.Values.Distinct(ArchivePath.Comparer).ToList();
             bool needsDefault=plan.TopFolders.Count==0 || await Task.Run(delegate {
                 try { return disc.Source.Entries(disc.Root).Any(p=>!plan.TopFolders.ContainsKey(Path.GetFileName(p))); }
                 catch(IOException) { return true; } catch(UnauthorizedAccessException) { return true; }
             });
-            if(needsDefault && !names.Contains(plan.Folder,StringComparer.OrdinalIgnoreCase))names.Add(plan.Folder);
+            if(needsDefault && !names.Contains(plan.Folder,ArchivePath.Comparer))names.Add(plan.Folder);
             resolved[plan.Folder]=plan.Folder;
             foreach(string proposed in names)
             {
@@ -435,7 +439,7 @@ namespace DiscArchive
                         e.Status="等待选择"; progress("有相似项目名，等待选择归档目录。");
                         project=await ChooseProject(e,proposed,a.Suggestions,token);
                         if(project!=proposed) {
-                            if(!a.Suggestions.Contains(project,StringComparer.OrdinalIgnoreCase)) throw new IOException("无效的项目选择。");
+                            if(!a.Suggestions.Contains(project,ArchivePath.Comparer)) throw new IOException("无效的项目选择。");
                             await Task.Run(()=>ProjectAliases.Remember(e.TargetRoot,proposed,project));
                             plan.Reason+=" 人工确认 "+proposed+" 归入 "+project+"。";
                         }

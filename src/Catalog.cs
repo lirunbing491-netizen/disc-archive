@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+
+#if !MAC_PORT
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+#endif
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -307,7 +310,7 @@ namespace DiscArchive
                 prefix=Path.Combine(e.TargetRoot,"DiscArchive",e.LatestRunId).TrimEnd('\\','/')+"\\";
             }
             string stored = e.Report.Replace('/', '\\');
-            if (!stored.StartsWith(prefix.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase)) return "";
+            if (!stored.StartsWith(prefix.Replace('/', '\\'), e.JobDir.Length>=2 && e.JobDir[1]==':' ? StringComparison.OrdinalIgnoreCase : ArchivePath.Comparison)) return "";
             string result = currentDirectory;
             foreach (string part in stored.Substring(prefix.Length).Split('\\')) result = CurrentChild(result, part);
             return result;
@@ -460,9 +463,11 @@ namespace DiscArchive
         internal static string OriginalPhotoAt(string targetRoot,Entry owner)
         {
             string directory=DiscFolder(targetRoot,owner.Id);
+            string stored=(owner.OriginalPhoto??owner.Photo??"").Replace('\\','/');
+            string leaf=stored.Substring(stored.LastIndexOf('/')+1);
             string[] photos=Directory.GetFiles(directory,"photo.*");
             foreach(string p in photos) {
-                if(String.Equals(Path.GetFileName(owner.OriginalPhoto??owner.Photo),Path.GetFileName(p),StringComparison.OrdinalIgnoreCase)) {
+                if(String.Equals(leaf,Path.GetFileName(p),ArchivePath.Comparison)) {
                     CheckNoLinks(p); return p;
                 }
             }
@@ -496,8 +501,8 @@ namespace DiscArchive
             dest.LatestRunId=run.Id; dest.ArchiveFolders=run.ArchiveFolders;
             if(dest.TitleState!="已确认") { dest.Project=run.Project; dest.Title=run.Project; }
             dest.Note="最近一次核对登记 "+run.Id+"。"+run.Note;
-            string prefix=run.JobDir.TrimEnd('\\')+"\\";
-            if(!String.IsNullOrEmpty(run.Report) && run.Report.StartsWith(prefix,StringComparison.OrdinalIgnoreCase))
+            string prefix=run.JobDir.TrimEnd('\\','/')+Path.DirectorySeparatorChar;
+            if(!String.IsNullOrEmpty(run.Report) && run.Report.StartsWith(prefix,ArchivePath.Comparison))
                 dest.Report=Path.Combine(dest.TargetRoot,"DiscArchive",run.Id,run.Report.Substring(prefix.Length));
         }
 
@@ -519,6 +524,9 @@ namespace DiscArchive
 
         private static byte[] MakeThumbnail(Stream source)
         {
+#if MAC_PORT
+            return PortableSupport.MakeThumbnail(source);
+#else
             using (Image image = Image.FromStream(source, true, true))
             {
                 if (Array.IndexOf(image.PropertyIdList, 0x0112) >= 0)
@@ -553,6 +561,7 @@ namespace DiscArchive
                     return output.ToArray();
                 }
             }
+#endif
         }
 
         private static void CleanAttempt(string directory, string[] files)

@@ -108,13 +108,13 @@ namespace DiscArchive
                     (layout.Volumes.Any(v=>!selected.Contains(v)) ? "，仅本次所选视图" : ""));
             } catch(Exception error) { ResourceCleanup.Preserve(error,result.Dispose); throw; }
         }
-        private bool IsCombinedRoot(string path) { return !oneAtRoot && String.Equals(Path.GetFullPath(path).TrimEnd('\\'),root.TrimEnd('\\'),StringComparison.OrdinalIgnoreCase); }
+        private bool IsCombinedRoot(string path) { return !oneAtRoot && String.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),root.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),ArchivePath.Comparison); }
         private ArchiveDiscSource Tree(string path)
         {
-            string p=Path.GetFullPath(path).TrimEnd('\\');
+            string p=Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
             foreach(Volume volume in volumes) {
-                string v=volume.Root.TrimEnd('\\');
-                if(p.Equals(v,StringComparison.OrdinalIgnoreCase) || p.StartsWith(v+"\\",StringComparison.OrdinalIgnoreCase))return volume.Tree;
+                string v=volume.Root.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+                if(p.Equals(v,ArchivePath.Comparison) || p.StartsWith(v+Path.DirectorySeparatorChar,ArchivePath.Comparison))return volume.Tree;
             }
             throw new DirectoryNotFoundException("虚拟卷路径无效。");
         }
@@ -123,7 +123,7 @@ namespace DiscArchive
             if(IsCombinedRoot(path)) {
                 foreach(Volume volume in volumes) yield return volume.Root;
             } else foreach(string entry in Tree(path).Entries(path)) yield return entry;
-            if(missing.Count>0 && String.Equals(Path.GetFullPath(path).TrimEnd('\\'),root.TrimEnd('\\'),StringComparison.OrdinalIgnoreCase))
+            if(missing.Count>0 && String.Equals(Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),root.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),ArchivePath.Comparison))
                 throw new IOException(String.Join(" ",missing.ToArray()));
         }
         internal override FileAttributes Attributes(string path) {return IsCombinedRoot(path)?FileAttributes.Directory:Tree(path).Attributes(path);}

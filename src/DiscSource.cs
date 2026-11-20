@@ -4,6 +4,17 @@ using System.IO;
 
 namespace DiscArchive
 {
+    internal static class ArchivePath
+    {
+#if MAC_PORT
+        internal static readonly StringComparison Comparison = StringComparison.Ordinal;
+        internal static readonly StringComparer Comparer = StringComparer.Ordinal;
+#else
+        internal static readonly StringComparison Comparison = StringComparison.OrdinalIgnoreCase;
+        internal static readonly StringComparer Comparer = StringComparer.OrdinalIgnoreCase;
+#endif
+    }
+
     // Only the source side of an import uses this interface. Destination paths
     // always go through the normal filesystem and its existing ownership checks.
     internal abstract class DiscSource
@@ -19,7 +30,20 @@ namespace DiscArchive
 
         private sealed class WindowsFiles : DiscSource
         {
-            internal override IEnumerable<string> Entries(string dir) { return Directory.EnumerateFileSystemEntries(dir); }
+            internal override IEnumerable<string> Entries(string dir)
+            {
+                bool ambiguous=false;
+                foreach(string path in Directory.EnumerateFileSystemEntries(dir))
+                {
+#if MAC_PORT
+                    // Backslash is legal on POSIX but ambiguous in shared Windows receipts.
+                    // Fail visibly rather than collapse it into a hierarchy or silently skip it.
+                    if(Path.GetFileName(path).IndexOf('\\')>=0) {ambiguous=true;continue;}
+#endif
+                    yield return path;
+                }
+                if(ambiguous)throw new IOException("原盘名称含反斜杠，无法安全写入跨平台清单；已保留可读同级项，该目录未确认完整。");
+            }
             internal override FileAttributes Attributes(string path) { return File.GetAttributes(path); }
             internal override long Length(string path) { return new FileInfo(path).Length; }
             internal override DateTime Modified(string path) { return File.GetLastWriteTime(path); }

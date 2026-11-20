@@ -45,13 +45,13 @@ namespace DiscArchive
             if (aliases.Length > 0)
             {
                 // Even a stale competing destination makes this key ambiguous: do not guess.
-                if (aliases.Length == 1 && known.Contains(aliases[0], StringComparer.OrdinalIgnoreCase))
-                { result.Resolved = known.First(x => String.Equals(x, aliases[0], StringComparison.OrdinalIgnoreCase)); result.Reason = "采用此归档目标内已确认的项目别名"; return result; }
+                if (aliases.Length == 1 && known.Contains(aliases[0], ArchivePath.Comparer))
+                { result.Resolved = known.First(x => String.Equals(x, aliases[0], ArchivePath.Comparison)); result.Reason = "采用此归档目标内已确认的项目别名"; return result; }
                 result.NeedsDecision=true; result.Reason = "已确认别名失效或存在冲突，需重新人工选择";
-                result.Suggestions = known.Where(x => aliases.Contains(x, StringComparer.OrdinalIgnoreCase)).Concat(known).Distinct(StringComparer.OrdinalIgnoreCase).Take(8).ToArray();
+                result.Suggestions = known.Where(x => aliases.Contains(x, ArchivePath.Comparer)).Concat(known).Distinct(ArchivePath.Comparer).Take(8).ToArray();
                 return result;
             }
-            string exact = known.FirstOrDefault(x => String.Equals(x, proposedFolder, StringComparison.OrdinalIgnoreCase));
+            string exact = known.FirstOrDefault(x => String.Equals(x, proposedFolder, ArchivePath.Comparison));
             if (exact != null) { result.Resolved = exact; result.Reason = "已存在同名项目目录"; return result; }
             if (proposed == null) { result.Reason = "混装、未知或日期/项目不明确，保留单盘隔离；可人工选择已有项目"; return result; }
             string[] equal = known.Where(x => Equivalent(proposed, Parse(x))).ToArray();
@@ -133,7 +133,7 @@ namespace DiscArchive
         private static string[] ReadAliases(string root, string proposed, CancellationToken token, out bool usable)
         {
             usable = true;
-            HashSet<string> destinations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> destinations = new HashSet<string>(ArchivePath.Comparer);
             try
             {
                 using (FileStream stream = OpenStore(root, false, token))

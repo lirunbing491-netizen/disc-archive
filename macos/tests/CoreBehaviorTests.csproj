@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+<PropertyGroup><OutputType>Exe</OutputType><EnableDefaultCompileItems>false</EnableDefaultCompileItems><TargetFramework>net8.0</TargetFramework><DefineConstants>MAC_PORT</DefineConstants><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable><StartupObject>CoreBehaviorTests</StartupObject></PropertyGroup>
+<ItemGroup>
+<Compile Include="CoreBehaviorTests.cs" />
+<Compile Include="HostProtocolTests.cs" />
+<Compile Include="../../src/Catalog.cs" Link="Shared/Catalog.cs" />
+<Compile Include="../../src/Workstation.cs" Link="Shared/Workstation.cs" />
+<Compile Include="../../src/DiscSource.cs" Link="Shared/DiscSource.cs" />
+<Compile Include="../../src/DiscIdentity.cs" Link="Shared/DiscIdentity.cs" />
+<Compile Include="../../src/RescueCopy.cs" Link="Shared/RescueCopy.cs" />
+<Compile Include="../../src/ContinuationJournal.cs" Link="Shared/ContinuationJournal.cs" />
+<Compile Include="../../src/DiscSession.cs" Link="Shared/DiscSession.cs" />
+<Compile Include="../../src/ProjectAliases.cs" Link="Shared/ProjectAliases.cs" />
+<Compile Include="../../src/DiscPlan.cs" Link="Shared/DiscPlan.cs" />
+<Compile Include="../../src/ProjectPhoto.cs" Link="Shared/ProjectPhoto.cs" />
+<Compile Include="../../src/CameraFileDate.cs" Link="Shared/CameraFileDate.cs" />
+<Compile Include="../../src/OpticalMount.cs" Link="Shared/OpticalMount.cs" />
+<Compile Include="../../src/OpticalLayout.cs" Link="Shared/OpticalLayout.cs" />
+<Compile Include="../../src/HfsCatalogGuard.cs" Link="Shared/HfsCatalogGuard.cs" />
+<Compile Include="../../src/ArchiveDiscSource.cs" Link="Shared/ArchiveDiscSource.cs" />
+<Compile Include="../Core/PortableSupport.cs" />
+<Compile Include="../Core/Host.cs" />
+<Compile Include="../Core/MacReader.cs" />
+<Compile Include="../Core/MacMountedSource.cs" Condition="Exists('../Core/MacMountedSource.cs')" />
+<Compile Include="../Core/MacSevenZip.cs" Condition="Exists('../Core/MacSevenZip.cs')" />
+<Compile Include="../../src/SevenZipReader.cs" Condition="!Exists('../Core/MacSevenZip.cs')" />
+<Compile Include="../../src/SevenZipInterop.cs" Condition="!Exists('../Core/MacSevenZip.cs')" />
+<Compile Include="../../tests/ArchiveTreeTests.cs" Link="SharedTests/ArchiveTreeTests.cs" />
+<Compile Include="../../tests/PlanTests.cs" Link="SharedTests/PlanTests.cs" />
+<Compile Include="../../tests/CameraFileDateTests.cs" Link="SharedTests/CameraFileDateTests.cs" />
+<Compile Include="../../tests/LayoutTests.cs" Link="SharedTests/LayoutTests.cs" />
+<Compile Include="../../tests/HfsGuardTests.cs" Link="SharedTests/HfsGuardTests.cs" />
+<Compile Include="../../tests/SourcePipelineTests.cs" Link="SharedTests/SourcePipelineTests.cs" />
+<Compile Include="../../tests/IdentityTests.cs" Link="SharedTests/IdentityTests.cs" />
+</ItemGroup></Project>

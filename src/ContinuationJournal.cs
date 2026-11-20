@@ -12,11 +12,11 @@ namespace DiscArchive
     internal sealed class ContinuationJournal : IDisposable
     {
         internal sealed class Entry { internal string Destination, Hash; internal long Length; internal bool Directory, Complete; }
-        private readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(ArchivePath.Comparer);
         private readonly string source, target;
-        private readonly Dictionary<string, Entry> fileHistory = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, Entry> oldFiles = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> encounteredFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, Entry> fileHistory = new Dictionary<string, Entry>(ArchivePath.Comparer);
+        private readonly Dictionary<string, Entry> oldFiles = new Dictionary<string, Entry>(ArchivePath.Comparer);
+        private readonly HashSet<string> encounteredFiles = new HashSet<string>(ArchivePath.Comparer);
         private readonly List<string> uncertainPrefixes = new List<string>();
         private string targetIdentity, legacyTarget;
         private FileStream gate, log;
@@ -24,7 +24,7 @@ namespace DiscArchive
         {
             source = Root(sourceRoot); target = Root(targetRoot);
             string journalRoot = Root(directory);
-            if (journalRoot.StartsWith(source, StringComparison.OrdinalIgnoreCase) || source.StartsWith(journalRoot, StringComparison.OrdinalIgnoreCase)) throw new IOException("续拷记录不能与原盘目录重叠。");
+            if (journalRoot.StartsWith(source, ArchivePath.Comparison) || source.StartsWith(journalRoot, ArchivePath.Comparison)) throw new IOException("续拷记录不能与原盘目录重叠。");
             Safe(directory); Directory.CreateDirectory(directory);
             try
             {
@@ -48,7 +48,7 @@ namespace DiscArchive
                 foreach (KeyValuePair<string, Entry> item in fileHistory) oldFiles.Add(item.Key, item.Value);
                 // Bind the original destination before any route can be used.
                 string binding = Path.Combine(directory, "continuation-target.txt"); Safe(binding);
-                if (File.Exists(binding)) { if (!String.Equals(File.ReadAllText(binding, Encoding.UTF8), targetIdentity, StringComparison.OrdinalIgnoreCase)) throw new IOException("续拷原目标与本次目标不一致。"); }
+                if (File.Exists(binding)) { if (!String.Equals(File.ReadAllText(binding, Encoding.UTF8), targetIdentity, ArchivePath.Comparison)) throw new IOException("续拷原目标与本次目标不一致。"); }
                 else { if (!importing) throw new IOException("续拷目标绑定缺失，不能确认原目标。"); using (FileStream f = new FileStream(binding, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { byte[] b = Encoding.UTF8.GetBytes(targetIdentity); f.Write(b, 0, b.Length); f.Flush(true); } }
                 log = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
                 if (log.Length == 0) Write("DiscArchive continuation v1");
@@ -83,20 +83,29 @@ namespace DiscArchive
             XmlNode idNode = rows[0].SelectSingleNode("TargetId"), rootNode = rows[0].SelectSingleNode("TargetRoot");
             Guid registered;
             if (idNode == null || !Guid.TryParse(idNode.InnerText, out registered) || id == null || registered.ToString("N") != id) throw new IOException("原盘登记副本与目标身份不符。");
-            if (rootNode != null && !String.IsNullOrWhiteSpace(rootNode.InnerText)) legacyTarget = Root(rootNode.InnerText);
+            if (rootNode != null && !String.IsNullOrWhiteSpace(rootNode.InnerText)) legacyTarget = StoredRoot(rootNode.InnerText);
         }
+        // Stored absolute paths can belong to another operating system. Never feed
+        // them through this machine's GetFullPath before checking their old root.
+        private static string StoredRoot(string s) { return s.Replace('\\','/').TrimEnd('/') + "/"; }
+        private static string StoredRelative(string root,string value)
+        {
+            string normalized=value.Replace('\\','/');
+            if(!normalized.StartsWith(root,root.Length>=3 && root[1]==':' ? StringComparison.OrdinalIgnoreCase : ArchivePath.Comparison)) throw new IOException("旧路径清单目标不属于原备份硬盘；未复用旧数据。");
+            string rel=normalized.Substring(root.Length); Validate(rel); return NativeRelative(rel);
+        }
+        private static string NativeRelative(string value) { return value.Replace('\\',Path.DirectorySeparatorChar).Replace('/',Path.DirectorySeparatorChar); }
         private static string Root(string s) { return Path.GetFullPath(s).TrimEnd('\\', '/') + Path.DirectorySeparatorChar; }
         private static string Encode(string s) { return Convert.ToBase64String(Encoding.UTF8.GetBytes(s)); }
         private static string Decode(string s) { return new UTF8Encoding(false, true).GetString(Convert.FromBase64String(s)); }
         private static string Digest(string s) { using (SHA256 h = SHA256.Create()) return BitConverter.ToString(h.ComputeHash(Encoding.UTF8.GetBytes(s))).Replace("-", ""); }
         internal static void Safe(string p)
         {
-            string current = Path.GetFullPath(p);
-            while (current != null) { if ((File.Exists(current) || Directory.Exists(current)) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException("续拷拒绝目标链接：" + current); current = Path.GetDirectoryName(current); }
+            Catalog.CheckNoLinks(Path.GetFullPath(p));
         }
         private static string Relative(string root, string p)
         {
-            p = Path.GetFullPath(p); if (!p.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new IOException("续拷路线越界。");
+            p = Path.GetFullPath(p); if (!p.StartsWith(root, ArchivePath.Comparison)) throw new IOException("续拷路线越界。");
             string rel = p.Substring(root.Length); Validate(rel); return rel;
         }
         private static void Validate(string rel)
@@ -115,7 +124,7 @@ namespace DiscArchive
             {
                 string[] f = line.Split('\t'); if (f.Length != 6) throw new IOException();
                 string body = String.Join("\t", f, 0, 5); if (Digest(body) != f[5]) throw new IOException();
-                string src = Decode(f[1]), dst = Decode(f[2]); Validate(src); ValidateDestination(dst);
+                string src = Decode(f[1]), dst = Decode(f[2]); Validate(src); ValidateDestination(dst); src=NativeRelative(src); dst=NativeRelative(dst);
                 long length; if (!Int64.TryParse(f[3], out length) || length < 0 || (f[0] != "D" && f[0] != "R" && f[0] != "F")) throw new IOException();
                 if (f[0] == "F") { if (f[4].Length != 64) throw new IOException(); foreach (char c in f[4]) if (!Uri.IsHexDigit(c)) throw new IOException(); }
                 Entry entry = new Entry { Destination = dst, Directory = f[0] == "D", Complete = f[0] == "F", Length = length, Hash = f[4] };
@@ -130,7 +139,7 @@ namespace DiscArchive
         {
             string full = Path.GetFullPath(src).TrimEnd('\\', '/');
             string root = source.TrimEnd('\\', '/');
-            if (String.Equals(full, root, StringComparison.OrdinalIgnoreCase)) { uncertainPrefixes.Add(""); return; }
+            if (String.Equals(full, root, ArchivePath.Comparison)) { uncertainPrefixes.Add(""); return; }
             uncertainPrefixes.Add(Relative(source, src));
         }
         internal List<KeyValuePair<string, Entry>> MissingFiles()
@@ -141,7 +150,7 @@ namespace DiscArchive
                 if (encounteredFiles.Contains(item.Key)) continue;
                 bool covered = false;
                 foreach (string prefix in uncertainPrefixes)
-                    if (prefix.Length == 0 || String.Equals(item.Key, prefix, StringComparison.OrdinalIgnoreCase) || item.Key.StartsWith(prefix + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) { covered = true; break; }
+                    if (prefix.Length == 0 || String.Equals(item.Key, prefix, ArchivePath.Comparison) || item.Key.StartsWith(prefix + Path.DirectorySeparatorChar, ArchivePath.Comparison)) { covered = true; break; }
                 if (!covered) missing.Add(new KeyValuePair<string, Entry>(Path.Combine(source, item.Key), item.Value));
             }
             return missing;
@@ -173,10 +182,16 @@ namespace DiscArchive
             foreach (string list in lists) foreach (string line in File.ReadAllLines(list, Encoding.UTF8))
             {
                 string[] f = line.Split('\t'); if (f.Length != 4 || (f[0] != "目录" && f[0] != "项目目录" && f[0] != "文件" && f[0] != "条目")) continue;
-                string old = Unescape(f[1]), dst = Unescape(f[2]); if (!Path.IsPathRooted(old) || !Path.IsPathRooted(dst)) throw new IOException("旧路径清单不是绝对路线。");
-                string rel = old.Substring(Path.GetPathRoot(old).Length); Validate(rel); string dest = legacyTarget != null && Path.GetFullPath(dst).StartsWith(legacyTarget, StringComparison.OrdinalIgnoreCase) ? Relative(legacyTarget, dst) : Relative(target, dst);
+                string old = Unescape(f[1]), dst = Unescape(f[2]);
+                string normalized=old.Replace('\\','/');
+                string rel;
+                if(normalized.Length>=3 && normalized[1]==':' && normalized[2]=='/') rel=normalized.Substring(3);
+                else if(normalized.StartsWith(StoredRoot(source),ArchivePath.Comparison)) rel=normalized.Substring(StoredRoot(source).Length);
+                else throw new IOException("旧清单的原盘根目录无法可靠映射；请保留旧记录，改用新登记重新抢救。");
+                Validate(rel); rel=NativeRelative(rel);
+                string dest=StoredRelative(legacyTarget??StoredRoot(target),dst);
                 ValidateDestination(dest);
-                Entry existing; if (entries.TryGetValue(rel, out existing) && !String.Equals(existing.Destination, dest, StringComparison.OrdinalIgnoreCase)) throw new IOException("旧路径清单有多套路线，无法安全自动续拷。");
+                Entry existing; if (entries.TryGetValue(rel, out existing) && !String.Equals(existing.Destination, dest, ArchivePath.Comparison)) throw new IOException("旧路径清单有多套路线，无法安全自动续拷。");
                 entries[rel] = new Entry { Destination = dest, Directory = f[0] == "目录" || f[0] == "项目目录", Complete = false, Hash = f[0] == "文件" ? "legacy" : "" };
             }
         }

@@ -6,7 +6,7 @@
 
 ## 下载与开始
 
-本版为 **v0.4.1-beta.1 Windows 光盘兼容测试版**：在 Windows 上归档普通数据光盘，也可读取部分 Windows 无法显示目录的 Mac 格式光盘。这是 Windows 程序，当前没有 macOS 版。
+Windows 光盘兼容测试版 **v0.4.1-beta.1** 支持普通数据光盘及部分 Windows 无法显示目录的 Mac 格式光盘。这个测试分支另有面向 Intel 和 Apple 芯片的 [macOS 版与试用说明](macos/README.md)。
 
 [下载光盘兼容测试版 ZIP](https://github.com/lirunbing491-netizen/disc-archive/releases/download/v0.4.1-beta.1/DiscArchive-Optical-Windows.zip)。需要稳定版时，请使用 [v0.1.0 单光驱稳定版（latest）](https://github.com/lirunbing491-netizen/disc-archive/releases/latest)。
 
