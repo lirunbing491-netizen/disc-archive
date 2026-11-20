@@ -33,7 +33,7 @@ xcrun clang -fobjc-arc -fblocks -Wall -Wextra -mmacosx-version-min=13.0 -DDA_DEV
 
 `raw` 是从 IOMedia 的 BSD 名构成的真实 `/dev/rdisk…` 节点，`bytes` / `sector` 来自 IOMedia；即使未挂载也可返回。此桥不为获取状态而扫描盘面。主节点优先 whole media，再按大小排序。`coverage=published-logical-media-only` 明确只覆盖系统公布的逻辑媒体，不保证音轨、隐藏会话、导入区、子通道或整张物理光盘全部被表示。不能把一份逻辑镜像宣称为完整音频/混合模式光盘保全。
 
-附加 `partitions` 包含发现的全部 IOMedia，保留 `id/raw/mount/label/format/bytes/sector/whole/offset`。`offset` 是相对选中主节点的字节偏移；只有祖先关系可以证明时提供非负值，否则为 -1。不要把同一数据的 whole 与子分区简单拼接，也不要把 -1 当作 0。主行 `mount/label/format` 只是首个已挂载介质的便利显示；需要处理多会话/分区时应使用全部数组。
+附加 `partitions` 包含发现的全部 IOMedia，保留 `id/raw/mount/label/format/bytes/sector/whole/offset`。`offset` 是相对选中主节点的字节偏移：主节点自身为 0，其他节点一律为 -1（未知）。公开用户空间 IOMedia.h 没有 Base 属性常量，不能用注册树父子关系推算实际字节偏移。未知偏移不删除该节点，也不影响它自身的 raw/mount/大小和已挂载多卷层级读取。不要把同一数据的 whole 与子分区简单拼接，也不要把 -1 当作 0；若需主 raw 中的分区偏移，必须独立解析可信分区表。主行 `mount/label/format` 只是首个已挂载介质的便利显示；需要处理多会话/分区时应使用全部数组。
 
 `targets` 只返回已挂载、本地、非只读、当前用户通过可写权限预检查、由真实块设备承载且明确标记 external 的卷。未知/缺失 external 证据的卷保守排除，网络卷、普通磁盘镜像及光驱不列入。挂载期间也可能移除、只读或写满，实际输出前仍须校验目标并处理错误；`access` 不是写入成功保证。APFS 外接卷和不同桥接芯片的实际枚举需要硬件验收。
 

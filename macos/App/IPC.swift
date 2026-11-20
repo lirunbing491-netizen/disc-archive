@@ -43,6 +43,11 @@ final class CoreIPC {
             }
             do { try process.run() }
             catch { output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil; throw error }
+            // Keep only this process's pipe ends. In particular, retaining an unused stdin read
+            // end would hide child EOF/EPIPE; retaining stdout's write end would prevent EOF.
+            try? input.fileHandleForReading.close()
+            try? output.fileHandleForWriting.close()
+            try? errors.fileHandleForWriting.close()
             writer.async { [weak self] in
                 guard let self = self else { return }
                 do { try self.input.fileHandleForWriting.write(contentsOf: first); if !persistent { try self.input.fileHandleForWriting.close() } }

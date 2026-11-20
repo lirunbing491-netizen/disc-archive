@@ -43,24 +43,12 @@ static NSString *DARaw(NSString *bsd) {
 }
 static BOOL DAOptical(io_service_t entry) { return IOObjectConformsTo(entry, "IOCDBlockStorageDevice"); }
 
-// offset is relative to the selected whole media. Unknown/overflow never becomes 0.
-static NSNumber *DAOffset(io_service_t entry, NSString *wholeID) {
-    io_registry_entry_t current = entry;
-    IOObjectRetain(current);
-    uint64_t sum = 0;
-    for (unsigned depth = 0; current && depth < 128; ++depth) {
-        if ([DAID(current) isEqualToString:wholeID]) { IOObjectRelease(current); return @(sum); }
-        if (IOObjectConformsTo(current, kIOMediaClass)) {
-            id base = DAProperties(current)[@kIOMediaBaseKey];
-            if (![base isKindOfClass:NSNumber.class] || [base longLongValue] < 0 || UINT64_MAX - sum < [base unsignedLongLongValue]) { IOObjectRelease(current); return @(-1); }
-            sum += [base unsignedLongLongValue];
-        }
-        io_registry_entry_t parent = IO_OBJECT_NULL;
-        IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent);
-        IOObjectRelease(current); current = parent;
-    }
-    if (current) IOObjectRelease(current);
-    return @(-1);
+// Public IOMedia.h exposes Size/Whole/Preferred Block Size, but no Base key.
+// Registry ancestry alone cannot prove a partition's byte displacement. Only
+// the selected media itself has a proven zero offset; all others remain unknown.
+// Preserve every partition/raw/mount independently even when its offset is -1.
+static NSNumber *DAOffset(NSString *mediaID, NSString *wholeID) {
+    return mediaID.length && wholeID.length && [mediaID isEqualToString:wholeID] ? @0 : @(-1);
 }
 
 static NSString *DAState(BOOL hasReadableMedia, NSString *reported) {
@@ -189,7 +177,7 @@ static NSDictionary *DADrive(io_service_t provider, DASessionRef session) {
     for (NSMutableDictionary *m in media) {
         if ([m[@"id"] length]) [IDs addObject:m[@"id"]];
         io_service_t entry = (io_service_t)[m[@"_entry"] unsignedIntValue];
-        m[@"offset"] = DAOffset(entry, primary[@"id"] ?: @"");
+        m[@"offset"] = DAOffset(m[@"id"], primary[@"id"] ?: @"");
         IOObjectRelease(entry); [m removeObjectForKey:@"_entry"];
         if (!mount.length && [m[@"mount"] length]) { mount=m[@"mount"]; label=m[@"label"]; format=m[@"format"]; }
     }
@@ -329,6 +317,9 @@ int main(void) {
         assert([DARaw(@"disk12s3") isEqualToString:@"/dev/rdisk12s3"]);
         assert(!DARaw(@"disk2;touch /tmp/x").length);
         assert(!DARaw(@"../disk1").length);
+        assert([DAOffset(@"301", @"301") longLongValue] == 0);
+        assert([DAOffset(@"302", @"301") longLongValue] == -1); // Preserve another volume; never invent its offset.
+        assert([DAOffset(@"", @"") longLongValue] == -1);
         assert([DAState(NO, @"") isEqualToString:@"not-ready"]);
         assert([DAState(NO, (__bridge NSString *)kDRDeviceMediaStateNone) isEqualToString:@"empty"]);
         assert([DAState(YES, (__bridge NSString *)kDRDeviceMediaStateInTransition) isEqualToString:@"not-ready"]);
