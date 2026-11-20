@@ -206,7 +206,6 @@ namespace DiscArchive
         private static void IntakeBinding(string root)
         {
             string target=Directory.CreateDirectory(Path.Combine(root,"target")).FullName;
-            string inbox=Directory.CreateDirectory(Path.Combine(root,"inbox")).FullName;
             string photo=Path.Combine(root,"label.png"); Photo(photo,Color.DarkGreen);
             var x=Fixture(root,@"X:\","X",target); var y=Fixture(root,@"Y:\","Y",target);
             using(var f=new MainForm(Path.Combine(root,"state"),new Readers(x,y)))
@@ -214,19 +213,26 @@ namespace DiscArchive
                 f.ShowInTaskbar=false; f.StartPosition=FormStartPosition.Manual; f.Location=new Point(-18000,-18000); f.Show();
                 Field<TextBox>(f,"target").Text=target;
                 Workstation sx=Select(f,x.Drive);
-                Call(f,"BeginWatch",new[]{typeof(string)},inbox);
+                Entry selected=Register(f,photo);
                 Workstation sy=Select(f,y.Drive);
-                File.Copy(photo,Path.Combine(inbox,"next.png"));
-                Spin(()=>sx.Current!=null,"incoming photo registered to original inbox drive");
-                Check(sx.Current.Drive==x.Drive && sy.Current==null,"inbox remains bound across a drive selection change");
-                sx.Stop(); Call(f,"EndWatch",Type.EmptyTypes);
+                Check(sx.Current==selected && selected.Drive==x.Drive && sy.Current==null,"manual photo stays on its selected drive when selection changes");
+                Original(selected,photo,"manual selected photo");
+                sx.Stop();
                 var camera=Field<CameraPanel>(f,"camera");
                 camera.BeforeShutter();
                 Select(f,x.Drive);
                 var delivery=(Action<string>)typeof(CameraPanel).GetField("onCapture",Hidden).GetValue(camera);
                 delivery(photo);
                 Check(sy.Current!=null && sy.Current.Drive==y.Drive && sx.Current==null,"shutter captures its drive even if selection changes before photo delivery");
-                sy.Stop(); f.Close();
+                Original(sy.Current,photo,"delayed shutter photo");
+                Register(f,photo);
+                Check(sx.Current!=null && sy.Current!=null,"manual photo on idle selected drive is independent of pending shutter peer");
+                Entry cameraEntry=sy.Current;
+                bool busyRefused=false;
+                try { Register(f,photo); }
+                catch(TargetInvocationException e) { busyRefused=e.InnerException is InvalidOperationException; }
+                Check(busyRefused && sy.Current==cameraEntry,"busy manual target rejects a second photo and preserves peer camera record");
+                sx.Stop(); sy.Stop(); f.Close();
             }
         }
         [STAThread]
@@ -238,7 +244,7 @@ namespace DiscArchive
                 Application.EnableVisualStyles();
                 Round(Directory.CreateDirectory(Path.Combine(root,"X-mounts-first")).FullName,false);
                 Round(Directory.CreateDirectory(Path.Combine(root,"Y-mounts-first")).FullName,true);
-                IntakeBinding(Directory.CreateDirectory(Path.Combine(root,"inbox-and-camera")).FullName);
+                IntakeBinding(Directory.CreateDirectory(Path.Combine(root,"manual-and-camera")).FullName);
                 Console.WriteLine("PASS "+checks+" multi-drive checks; generated artifacts retained: "+root); return 0;
             }
             catch(Exception e) { Console.Error.WriteLine(e); Console.Error.WriteLine("Generated artifacts: "+root); return 1; }

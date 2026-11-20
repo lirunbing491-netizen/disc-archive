@@ -1,12 +1,12 @@
 ﻿$ErrorActionPreference = 'Stop'
-$version = '0.4.1-beta.1'
+$version = '0.4.4-beta.1'
 if ($PSVersionTable.PSEdition -eq 'Core') {
     & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
     exit $LASTEXITCODE
 }
 $src = Join-Path $PSScriptRoot 'src'
 $dist = Join-Path $PSScriptRoot 'dist'
-$release = Join-Path $dist 'DiscArchive-Optical'
+$release = Join-Path $dist ('DiscArchive-Windows-' + $version)
 [void][IO.Directory]::CreateDirectory($release)
 $exe = Join-Path $release '导盘助手.exe'
 $compiler = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
@@ -54,7 +54,7 @@ foreach ($existing in Get-ChildItem -LiteralPath $release -File -Recurse) {
 }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$zipPath = Join-Path $dist 'DiscArchive-Optical-Windows.zip'
+$zipPath = Join-Path $dist ('DiscArchive-Windows-' + $version + '.zip')
 $tempZip = Join-Path $dist ('DiscArchive-package-' + [Guid]::NewGuid().ToString('N') + '.zip')
 $archive = $null
 try {
@@ -62,7 +62,7 @@ try {
     foreach ($name in $files) {
         $file = Join-Path $release $name
         if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "缺少发行文件：$name" }
-        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, ('DiscArchive-Optical/' + $name), [IO.Compression.CompressionLevel]::Optimal)
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file, ('DiscArchive-Windows-' + $version + '/' + $name), [IO.Compression.CompressionLevel]::Optimal)
     }
     $archive.Dispose()
     $archive = $null

@@ -276,6 +276,72 @@ int da_verify(const char *drive, const char *token) {
         return current.length && [current isEqualToString:expected] ? 1 : 0;
     }
 }
+// Retained native handles never re-resolve a recycled /dev/disk number or path.
+@interface DAEjectTicket : NSObject
+@property(nonatomic) io_service_t provider;
+@property(nonatomic) DRDeviceRef device;
+@property(nonatomic,copy) NSString *identity;
+@property(nonatomic,copy) NSString *token;
+@property(nonatomic) BOOL attempted;
+@end
+@implementation DAEjectTicket
+- (void)dealloc {
+    if (_device) CFRelease(_device);
+    if (_provider) IOObjectRelease(_provider);
+}
+@end
+static NSDictionary *DAEjectPolicy(BOOL attached, NSString *current, NSString *expected, BOOL deviceValid, OSStatus (^eject)(void)) {
+    if (!attached || !current.length || !expected.length || ![current isEqualToString:expected] || !deviceValid)
+        return @{@"ok":@NO, @"reason":@"光盘已更换、光驱断开或原介质不再就绪；未弹盘。"};
+    OSStatus status = eject();
+    return status == noErr ? @{@"ok":@YES,@"reason":@""} :
+        @{@"ok":@NO,@"reason":[NSString stringWithFormat:@"macOS 未能正常卸载并弹出光盘（OSStatus %d）；请关闭占用光盘的程序后手动弹出。", (int)status]};
+}
+void *da_eject_prepare(const char *drive, const char *token) {
+    if (!da_verify(drive, token)) return NULL;
+    @autoreleasepool {
+        NSString *identity = [NSString stringWithUTF8String:drive];
+        NSString *expected = [NSString stringWithUTF8String:token];
+        io_service_t provider = DAProvider(identity);
+        if (!provider) return NULL;
+        io_string_t path;
+        if (IORegistryEntryGetPath(provider, kIOServicePlane, path) != KERN_SUCCESS ||
+            ![DACurrentToken(provider) isEqualToString:expected]) { IOObjectRelease(provider); return NULL; }
+        DRDeviceRef device = DRDeviceCopyDeviceForIORegistryEntryPath((__bridge CFStringRef)[NSString stringWithUTF8String:path]);
+        if (!device) { IOObjectRelease(provider); return NULL; }
+        DAEjectTicket *ticket = [DAEjectTicket new];
+        ticket.provider = provider; ticket.device = device; ticket.identity = identity; ticket.token = expected;
+        if (!DRDeviceIsValid(device) || ![DACurrentToken(provider) isEqualToString:expected]) return NULL;
+        return (__bridge_retained void *)ticket;
+    }
+}
+char *da_eject_try(void *opaque) {
+    if (!opaque) return NULL;
+    @autoreleasepool {
+        DAEjectTicket *ticket = (__bridge DAEjectTicket *)opaque;
+        NSDictionary *result;
+        @synchronized(ticket) {
+            if (ticket.attempted) result = @{@"ok":@NO,@"reason":@"弹盘请求已处理；不会重复弹出或改选其他光驱。"};
+            else {
+                ticket.attempted = YES;
+                io_string_t path;
+                BOOL attached = IORegistryEntryGetPath(ticket.provider, kIOServicePlane, path) == KERN_SUCCESS && [DAID(ticket.provider) isEqualToString:ticket.identity];
+                result = DAEjectPolicy(attached, DACurrentToken(ticket.provider), ticket.token, DRDeviceIsValid(ticket.device), ^OSStatus{
+                    // SDK-native physical optical-device operation: normal unmount
+                    // is performed by DiscRecording; busy volumes cause failure.
+                    return DRDeviceEjectMedia(ticket.device);
+                });
+            }
+        }
+        NSData *data = [NSJSONSerialization dataWithJSONObject:result options:0 error:NULL];
+        if (!data) return NULL;
+        char *out = malloc(data.length + 1);
+        if (!out) return NULL;
+        memcpy(out, data.bytes, data.length); out[data.length] = 0; return out;
+    }
+}
+void da_eject_release(void *ticket) { if (ticket) { @autoreleasepool { id released = CFBridgingRelease(ticket); (void)released; } } }
+
 char *da_tracks(const char *drive, const char *token) {
     @autoreleasepool {
         NSString *note = @"仅可见数据视图；未取得额外未覆盖内容的可靠证据，历史会话和完整物理覆盖未知。";
@@ -407,6 +473,16 @@ int main(void) {
         NSDictionary *directoryReport = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:directoryError length:strlen(directoryError)] options:0 error:NULL];
         assert([directoryReport[@"names"] count] == 0 && [directoryReport[@"error"] length] > 0);
         da_free(directoryError);
+        __block int ejections = 0;
+        OSStatus (^fakeEject)(void) = ^OSStatus { ++ejections; return noErr; };
+        assert(![DAEjectPolicy(NO, a, a, YES, fakeEject)[@"ok"] boolValue]);
+        assert(![DAEjectPolicy(YES, DAToken(@"101", @[@"401"]), a, YES, fakeEject)[@"ok"] boolValue]);
+        assert(![DAEjectPolicy(YES, DAToken(@"102", @[@"301", @"302"]), a, YES, fakeEject)[@"ok"] boolValue]);
+        assert(![DAEjectPolicy(YES, a, a, NO, fakeEject)[@"ok"] boolValue]);
+        assert(ejections == 0); // disconnect/swap/multiple-drive paths have no side effect
+        assert([DAEjectPolicy(YES, a, a, YES, fakeEject)[@"ok"] boolValue] && ejections == 1);
+        assert(![DAEjectPolicy(YES, a, a, YES, ^OSStatus { return (OSStatus)-47; })[@"ok"] boolValue]);
+        assert(!da_eject_prepare(NULL, NULL)); // rejected without device discovery
         puts("DiscDevices synthetic policy tests passed (no hardware accessed).");
     }
     return 0;

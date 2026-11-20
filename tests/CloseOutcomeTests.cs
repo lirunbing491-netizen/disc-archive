@@ -36,17 +36,19 @@ internal static class CloseOutcomeTests
     }
     private sealed class SyntheticReader : IReader
     {
+        internal Func<IOpticalEjectTicket> Prepare;
         internal string Source, Coverage;
+        internal string Drive = @"X:\";
         internal int OpenThread, VerifyCalls;
         internal bool OpenInPool, VerifyInPool;
         internal Action OnVerify;
         internal readonly BrokenLease Lease = new BrokenLease();
-        public string[] Drives() { return new[] { @"X:\" }; }
+        public string[] Drives() { return new[] { Drive }; }
         public bool Empty(string drive) { return false; }
-        public bool Ready(string drive) { return drive == @"X:\"; }
+        public bool Ready(string drive) { return drive == Drive; }
         public MountedDisc Open(string drive)
         {
-            if (drive != @"X:\") throw new IOException("Synthetic drive unavailable");
+            if (drive != Drive) throw new IOException("Synthetic drive unavailable");
             OpenThread = Thread.CurrentThread.ManagedThreadId;
             OpenInPool = Thread.CurrentThread.IsThreadPoolThread;
             MountedDisc disc = new MountedDisc(Source, Label, delegate {
@@ -55,8 +57,29 @@ internal static class CloseOutcomeTests
                 if (OnVerify != null) OnVerify();
             }, Lease);
             disc.UncoveredTracks = Coverage;
+            disc.PrepareEject = Prepare;
             return disc;
         }
+    }
+    private sealed class RecordingTicket : IOpticalEjectTicket
+    {
+        internal int Calls, Disposals;
+        internal bool Refuse, HasReceipt, ClosedSource, InPool;
+        internal readonly Fixture Fixture;
+        internal RecordingTicket(Fixture f){Fixture=f;}
+        public bool TryEject(out string reason)
+        {
+            Calls++;
+            InPool=Thread.CurrentThread.IsThreadPoolThread;
+            ClosedSource=Fixture.Reader.Lease.Disposals==1;
+            var e=Fixture.Intake;
+            HasReceipt=File.Exists(Path.Combine(e.JobDir,"续导结果.xml")) &&
+                Fixture.Station.Book.List().Single(x=>x.Id==e.Id).Status==Workstation.Done &&
+                Fixture.Station.Book.ReadOrigin(e,e.Id).Status==Workstation.Done;
+            reason=Refuse ? "SYNTHETIC_DEVICE_BUSY" : "";
+            return !Refuse;
+        }
+        public void Dispose(){Disposals++;}
     }
     private sealed class Fixture
     {
@@ -75,17 +98,17 @@ internal static class CloseOutcomeTests
     { if (!ok) throw new Exception(name); checks++; Console.WriteLine("PASS " + name); }
     private static string Dir(string name)
     { return Directory.CreateDirectory(Path.Combine(root, name)).FullName; }
-    private static Fixture NewFixture(string name, bool broken)
+    private static Fixture NewFixture(string name, bool broken, string drive = @"X:\")
     {
         string prefix = (++serial) + "-" + name;
         string source = Dir(prefix + "-source");
         File.WriteAllText(Path.Combine(source, "first.bin"), "first real synthetic payload");
         File.WriteAllText(Path.Combine(source, "second.bin"), "second real synthetic payload with another length");
         Directory.CreateDirectory(Path.Combine(source, "empty-folder"));
-        Fixture f = new Fixture { Target = Dir(prefix + "-target"), State = Dir(prefix + "-state"), Reader = new SyntheticReader { Source = source } };
+        Fixture f = new Fixture { Target = Dir(prefix + "-target"), State = Dir(prefix + "-state"), Reader = new SyntheticReader { Source = source, Drive = drive } };
         f.Reader.Lease.Broken = broken;
         f.Station = new Workstation(new Catalog(f.State), f.Reader, delegate { return ""; }, delegate { return "metadata"; });
-        f.Intake = f.Station.Register(photo, f.Target, "", @"X:\", "", true);
+        f.Intake = f.Station.Register(photo, f.Target, "", drive, "", true);
         return f;
     }
     private static T Pump<T>(Task<T> task)
@@ -155,6 +178,8 @@ internal static class CloseOutcomeTests
     private static void PartialRead()
     {
         Fixture f = NewFixture("source-failure", true);
+        int preparations=0;
+        f.Reader.Prepare=delegate {preparations++;return new RecordingTicket(f);};
         Entry e;
         using (FileStream locked = File.Open(Path.Combine(f.Reader.Source, "second.bin"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             e = Copy(f, null);
@@ -163,6 +188,40 @@ internal static class CloseOutcomeTests
         Check(LastProgress(e).StartsWith("完成\t1\t", StringComparison.Ordinal) && LastProgress(e).Split('\t')[3] == "1",
             "partial rescue log retains its one true failed entry");
         CheckWarning(f, e);
+        Check(preparations==0,"partial results leave tray available for retry");
+    }
+
+    private static void EjectAfterReceipts(bool refuse,bool blockReceipt)
+    {
+        Fixture f=NewFixture("eject",false);
+        var ticket=new RecordingTicket(f){Refuse=refuse};
+        bool boundWhileReading=false;
+        f.Reader.Prepare=delegate {
+            boundWhileReading=Thread.CurrentThread.IsThreadPoolThread && f.Reader.Lease.Disposals==0;
+            if(blockReceipt) Directory.CreateDirectory(Path.Combine(f.Intake.JobDir,"续导结果.xml"));
+            return ticket;
+        };
+        var done=Copy(f,null);
+        Check(done.Status==Workstation.Done && done.Failed==0 && done.Files==2,"eject or summary issue never rewrites verified payload status");
+        Check(boundWhileReading && ticket.Disposals==1,"prepare with source alive and always dispose protected ticket");
+        if(blockReceipt) Check(ticket.Calls==0 && f.Station.LastEjectNote.Contains("汇总"),"incomplete summary prevents ejection");
+        else {
+            Check(ticket.Calls==1 && ticket.ClosedSource && ticket.HasReceipt && ticket.InPool,"one eject only after source close and both receipts, off UI thread");
+            Check(f.Station.LastEjectNote.Contains(refuse ? "SYNTHETIC_DEVICE_BUSY" : "已接受"),"operator sees actual eject outcome");
+        }
+    }
+
+    private static void EjectOnlyFinishedDrive()
+    {
+        Fixture first=NewFixture("pair-good",false,@"X:\"), second=NewFixture("pair-bad",false,@"Y:\");
+        var one=new RecordingTicket(first); var two=new RecordingTicket(second);
+        first.Reader.Prepare=()=>one; second.Reader.Prepare=()=>two;
+        using(File.Open(Path.Combine(second.Reader.Source,"second.bin"),FileMode.Open,FileAccess.ReadWrite,FileShare.None)) {
+            Entry[] results=Pump(Task.WhenAll(first.Station.Copy(delegate{}),second.Station.Copy(delegate{})));
+            Check(results[0].Status==Workstation.Done && results[1].Status==Workstation.Partial,"each optical drive keeps its own result");
+        }
+        Check(one.Calls==1 && two.Calls==0 && first.Station.LastEjectAccepted && !second.Station.LastEjectAccepted,
+            "only the completed drive receives the eject command while the partial disc stays inserted");
     }
     private static void Interrupted(Form owner, bool cancel, bool targetLoss)
     {
@@ -268,6 +327,8 @@ internal static class CloseOutcomeTests
                 Check(SynchronizationContext.Current is WindowsFormsSynchronizationContext && Thread.CurrentThread.GetApartmentState() == ApartmentState.STA,
                     "tests preserve normal STA Windows Forms synchronization context");
                 Complete(false); Complete(true); PartialRead();
+                EjectAfterReceipts(false,false); EjectAfterReceipts(true,false); EjectAfterReceipts(false,true);
+                EjectOnlyFinishedDrive();
                 Interrupted(owner, true, false); Interrupted(owner, false, false); Interrupted(owner, false, true);
                 UncoveredTracks(); ActualNoticeAndOriginal(); owner.Close();
             }

@@ -56,7 +56,16 @@ struct ApplicationEntry {
             let ready = all.compactMap { $0 as? NSTextField }.contains { $0.stringValue.hasPrefix("发现 ") }
             if labels == ["导盘", "登记册", "摄像头", "识图设置"] && ready {
                 print("PASS packaged AppKit window, four tabs, startup recovery and native device inventory")
-                app.terminate(nil)
+                guard let desk = app.delegate as? Desk else { exit(5) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+                    fputs("Packaged catalog checks timed out.\n", stderr); exit(5)
+                }
+                desk.checkWorkbenchFeatures { result in
+                    switch result {
+                    case .success(let evidence): print("PASS " + evidence); app.terminate(nil)
+                    case .failure(let error): fputs("Packaged catalog checks failed: \(error.localizedDescription)\n", stderr); exit(5)
+                    }
+                }
                 return
             }
         }

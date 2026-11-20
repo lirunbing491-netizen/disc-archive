@@ -17,10 +17,12 @@ private struct DeskSubmission {
     }
 }
 private final class DeskTask {
+    let identity = UUID().uuidString
     var process: CoreIPC.Job?
     let submission: DeskSubmission
     var status = "正在登记…", log = "", entry: IPCObject?, pending: IPCObject?
     var expectedHint: String, disconnected = false, registered = false, gotResult = false, hadError = false
+    var ejectNote = "", registeredID = ""
     init(_ submission: DeskSubmission) { self.submission = submission; expectedHint = submission.drive.mediaHint }
 }
 private final class PhotoDropView: NSView {
@@ -37,7 +39,9 @@ private final class DeskMenuAction: NSObject {
     @objc func changed() { handler() }
 }
 
-@MainActor final class Desk: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+@MainActor final class Desk: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSTabViewDelegate, UNUserNotificationCenterDelegate {
+    private static let retryNotificationAction = "discarchive.retry-original"
+    private static let retryNotificationCategory = "discarchive.retryable-result"
     private var window: NSWindow!
     private let driveMenu = NSPopUpButton(), targetsMenu = NSPopUpButton(), projectMenu = NSPopUpButton(), viewMenu = NSPopUpButton()
     private let targetField = NSTextField(string: ""), projectField = NSTextField(string: "")
@@ -48,7 +52,9 @@ private final class DeskMenuAction: NSObject {
     private let logView = NSTextView(), preview = NSImageView()
     private let table = NSTableView(), search = NSSearchField(), editTitle = NSTextField(string: ""), editProject = NSTextField(string: "")
     private let recordNote = NSTextField(wrappingLabelWithString: "选择登记后可改标签、续导或查看回执。")
-    private let watchNote = NSTextField(wrappingLabelWithString: "未启用照片文件夹接收。每次只接收一张，固定绑定启用时的光驱。")
+    private let importedNote = NSTextField(labelWithString: "本机已导 0 张")
+    private let showHidden = NSButton(checkboxWithTitle: "查看已移除", target: nil, action: nil)
+    private let retryButton = NSButton(title: "重试所选光驱原盘（无需重拍）", target: nil, action: nil)
     private let tabs = NSTabView()
     private var capture: CapturePane!, vision: VisionPane!
     private var drives: [DeskDrive] = [], targets: [IPCObject] = [], jobs: [String: DeskTask] = [:]
@@ -58,16 +64,20 @@ private final class DeskMenuAction: NSObject {
     private var notificationRequested = false
     private var recovered = false
     private var sheetOpen = false
-    private var watchFolder: URL?, watchDrive: String?, watchSeen: Set<String> = [], watchCandidate: (String, UInt64, Date)?
+    private var retryChecking = false
+    private var requestedCatalogSelection: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = self
+        let retry = UNNotificationAction(identifier: Self.retryNotificationAction, title: "重试这张盘", options: [.foreground])
+        UNUserNotificationCenter.current().setNotificationCategories([UNNotificationCategory(identifier: Self.retryNotificationCategory, actions: [retry], intentIdentifiers: [], options: [])])
         buildWindow(); capture.setCaptureEnabled(false); overall.stringValue = "正在核对上次中断记录，完成前不允许登记。"
         CoreIPC.run("recover") { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success:
                 self.recovered = true; self.refreshDevices(); self.refreshCatalog()
-                self.timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in Task { @MainActor in self?.refreshDevices(); self?.pollPhotoFolder() } }
+                self.timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in Task { @MainActor in self?.refreshDevices() } }
             case .failure(let error): self.overall.stringValue = "上次中断记录核对失败，登记已暂停：\(error.localizedDescription)"; self.notice("请修复本地归档组件后重新启动。未开始任何导盘任务。\n\(error.localizedDescription)")
             }
         }
@@ -83,7 +93,7 @@ private final class DeskMenuAction: NSObject {
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self = self else { return }
             if response == .alertSecondButtonReturn {
-                self.closing = true; self.capture.stopPreview(); self.vision.cancel(); self.disableWatch()
+                self.closing = true; self.capture.stopPreview(); self.vision.cancel()
                 for job in self.jobs.values where job.process != nil { job.process?.send(["action": "cancel"]) }
                 self.overall.stringValue = "已请求所有光驱停止，等待它们保存回执并结束后退出。"
                 self.maybeQuit()
@@ -123,12 +133,14 @@ private final class DeskMenuAction: NSObject {
         NSLayoutConstraint.activate([dropText.centerXAnchor.constraint(equalTo: drop.centerXAnchor), dropText.centerYAnchor.constraint(equalTo: drop.centerYAnchor)])
         drop.receive = { [weak self] url in Task { @MainActor in self?.importPhoto(url) } }
         let targetRow = row([label("归档目录"), targetField, button("选择目录…", #selector(chooseTarget))])
-        let importPanel = column([targetRow, row([label("直连卷快捷入口"), targetsMenu]), row([label("项目"), projectField, projectMenu, button("刷新项目", #selector(refreshProjects))]), row([label("读取格式"), viewMenu, button("查看当前盘信息", #selector(inspectDisc))]), manualCheck, drop, row([button("选择盘面照片并登记…", #selector(choosePhoto)), button("停止所选光驱", #selector(stopSelected)), button("已核对所选盘，继续", #selector(confirmSelected))]), photoLabel, selectedStatus, row([button("启用照片文件夹接收…", #selector(chooseWatchFolder)), button("停止接收", #selector(stopWatch))]), watchNote])
+        retryButton.target = self; retryButton.action = #selector(retrySelectedTask)
+        let importPanel = column([targetRow, row([label("直连卷快捷入口"), targetsMenu]), row([label("项目"), projectField, projectMenu, button("刷新项目", #selector(refreshProjects))]), row([label("读取格式"), viewMenu, button("查看当前盘信息", #selector(inspectDisc))]), manualCheck, drop, row([button("选择盘面照片并登记…", #selector(choosePhoto)), button("停止所选光驱", #selector(stopSelected)), button("已核对所选盘，继续", #selector(confirmSelected))]), photoLabel, selectedStatus, retryButton])
         drop.widthAnchor.constraint(equalTo: importPanel.widthAnchor).isActive = true
         let logScroll = NSScrollView(); logScroll.hasVerticalScroller = true; logScroll.documentView = logView; logView.isEditable = false; logView.font = .monospacedSystemFont(ofSize: 12, weight: .regular); logView.isVerticallyResizable = true; logView.isHorizontallyResizable = false; logView.autoresizingMask = [.width]; logView.textContainer?.widthTracksTextView = true; logView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude); logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         importPanel.addArrangedSubview(logScroll); logScroll.widthAnchor.constraint(equalTo: importPanel.widthAnchor).isActive = true
+        tabs.delegate = self; capture.setCameraPageActive(false)
         addTab("导盘", importPanel); addTab("登记册", buildCatalog()); addTab("摄像头", column([label("摄像头使用顶部同一个光驱选择；快门时固定光驱、目录、项目及识图方式。"), capture])); addTab("识图设置", column([vision]))
-        let top = row([label("当前光驱"), driveMenu, button("刷新设备", #selector(refreshAction))])
+        let top = row([label("当前光驱"), driveMenu, button("刷新设备", #selector(refreshAction)), button("使用说明", #selector(openHandbook))])
         let root = column([top, overall, tabs]); root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView!.addSubview(root)
         NSLayoutConstraint.activate([root.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 16), root.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -16), root.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 14), root.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor, constant: -14), tabs.widthAnchor.constraint(equalTo: root.widthAnchor)])
@@ -139,17 +151,22 @@ private final class DeskMenuAction: NSObject {
     }
     private func buildCatalog() -> NSView {
         search.placeholderString = "搜索盘号、标题、项目、状态"; search.delegate = self; stretch(search, width: 300)
-        for (name, title, width) in [("Id", "盘号", 130.0), ("Title", "标题", 240.0), ("Project", "项目", 160.0), ("Status", "状态", 140.0)] { let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(name)); c.title = title; c.width = width; table.addTableColumn(c) }
+        for (name, title, width) in [("Primary", "项目 / 标题", 260.0), ("Alternate", "补充标题", 200.0), ("Status", "状态", 120.0), ("TargetName", "归档位置", 160.0)] { let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(name)); c.title = title; c.width = width; table.addTableColumn(c) }
         table.delegate = self; table.dataSource = self; table.allowsMultipleSelection = false
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.documentView = table; scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 250).isActive = true
         preview.imageScaling = .scaleProportionallyUpOrDown; preview.widthAnchor.constraint(equalToConstant: 140).isActive = true; preview.heightAnchor.constraint(equalToConstant: 100).isActive = true
         stretch(editTitle, width: 350); stretch(editProject, width: 350)
         let editor = row([preview, column([row([label("标题"), editTitle]), row([label("项目标签"), editProject]), recordNote])])
-        let panel = column([row([search, button("刷新", #selector(refreshCatalog)), button("导出本机CSV…", #selector(exportLocal)), button("导出此归档目录总表…", #selector(exportTarget))]), scroll, editor, row([button("保存标签", #selector(saveLabels)), button("原盘号核对/续导", #selector(resumeSelected)), button("打开项目", #selector(openProject)), button("打开回执", #selector(openReceipt)), button("查看归类依据", #selector(showEvidence))])])
+        showHidden.target = self; showHidden.action = #selector(toggleHiddenFilter)
+        let panel = column([row([importedNote, search, button("刷新", #selector(refreshCatalog)), button("导出本机CSV…", #selector(exportLocal)), button("导出此归档目录总表…", #selector(exportTarget))]), scroll, editor, row([button("保存标签", #selector(saveLabels)), button("手工补录…", #selector(addManual)), button("从本机移除", #selector(hideSelected)), button("恢复到本机列表", #selector(restoreSelected)), showHidden]), row([ button("原盘号核对/续导", #selector(resumeSelected)), button("打开项目", #selector(openProject)), button("打开回执", #selector(openReceipt)), button("查看归类依据", #selector(showEvidence))])])
         scroll.widthAnchor.constraint(equalTo: panel.widthAnchor).isActive = true; return panel
     }
 
     @objc private func refreshAction() { refreshDevices() }
+    @objc private func openHandbook() {
+        let url = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/使用说明.txt")
+        guard FileManager.default.fileExists(atPath: url.path), NSWorkspace.shared.open(url) else { notice("未找到随应用打包的使用说明，请重新下载完整安装包。"); return }
+    }
     private func refreshDevices() {
         guard recovered, !polling, !closing else { return }; polling = true
         CoreIPC.run("devices") { [weak self] result in
@@ -190,7 +207,8 @@ private final class DeskMenuAction: NSObject {
         else { selectedStatus.stringValue = "所选光驱尚无任务；拍照/导入会固定绑定这个光驱。"; logView.string = "" }
         let targetChanged = targetDeviceId.map { matchingTarget(targetField.stringValue) != $0 } ?? false
         if targetChanged { selectedStatus.stringValue = "归档目标卷已断连或重新连接，身份已变化。开始下一张前请重新选择归档目录。\n" + selectedStatus.stringValue }
-        capture?.setCaptureEnabled(!closing && !targetChanged && !selectedDrive.isEmpty && jobs[selectedDrive]?.process == nil)
+        retryButton.isEnabled = !closing && !retryChecking && jobs[selectedDrive]?.process == nil && isRetryable(jobs[selectedDrive]?.entry)
+        capture?.setCaptureEnabled(!retryChecking && !closing && !targetChanged && !selectedDrive.isEmpty && jobs[selectedDrive]?.process == nil)
         showNextInteraction()
     }
     @objc private func chooseTarget() { let p = NSOpenPanel(); p.title = "选择直连卷中的任意可写归档目录"; p.canChooseDirectories = true; p.canChooseFiles = false; p.canCreateDirectories = true; p.beginSheetModal(for: window) { [weak self] r in if r == .OK, let url = p.url { self?.acceptTarget(url) } } }
@@ -211,7 +229,7 @@ private final class DeskMenuAction: NSObject {
     @objc private func selectProject() { if projectMenu.indexOfSelectedItem > 0 { projectField.stringValue = projectMenu.titleOfSelectedItem ?? "" } }
     private func snapshot(resume: String? = nil) throws -> DeskSubmission {
         guard recovered else { throw CaptureFailure("尚未完成上次中断记录核对，不能登记新任务。") }
-        guard !closing else { throw CaptureFailure("正在安全退出，不能再开始任务。") }
+        guard !closing && !retryChecking else { throw CaptureFailure("正在安全退出，不能再开始任务。") }
         guard let drive = drives.first(where: { $0.id == selectedDrive }) else { throw CaptureFailure("所选光驱不在线，请刷新设备。") }
         guard drive.empty || drive.ready else { throw CaptureFailure("光驱仍在识盘或状态未知，请等设备就绪；不会把未知状态当成空仓。") }
         guard jobs[drive.id]?.process == nil else { throw CaptureFailure("此光驱尚在工作。可切换另一光驱继续。") }
@@ -225,6 +243,7 @@ private final class DeskMenuAction: NSObject {
     @objc private func choosePhoto() { let p = NSOpenPanel(); p.title = "选择一张盘面照片并登记"; p.canChooseDirectories = false; p.allowsMultipleSelection = false; p.allowedFileTypes = ["jpg", "jpeg", "png", "heic", "tif", "tiff"]; p.beginSheetModal(for: window) { [weak self] r in if r == .OK, let u = p.url { self?.importPhoto(u) } } }
     private func importPhoto(_ url: URL) { do { let submission = try snapshot(); start(photo: url, submission: submission, ownTemporary: false) } catch { notice(error.localizedDescription) } }
     private func start(photo: URL, submission: DeskSubmission, ownTemporary: Bool) {
+        if let id = submission.resumeId, jobs.values.contains(where: { $0.process != nil && ($0.registeredID == id || $0.submission.resumeId == id || ($0.entry?["Id"] as? String) == id) }) { notice("此原盘号已在其他光驱工作，不能同时续导；原照片保留。"); return }
         if let expected = submission.targetDeviceId, matchingTarget(submission.target) != expected { notice("快门后归档目标卷已断连或身份已变化。请重新选择归档目录后再开始，照片已保留：\(photo.path)"); return }
         guard jobs[submission.drive.id]?.process == nil, let current = drives.first(where: { $0.id == submission.drive.id }), (submission.drive.empty || current.mediaHint == submission.drive.mediaHint) else { notice("快门后驱动状态已变化或正在工作；未登记，照片已保留：\(photo.path)"); return }
         let task = DeskTask(submission); jobs[submission.drive.id] = task
@@ -240,6 +259,7 @@ private final class DeskMenuAction: NSObject {
         switch o["event"] as? String ?? "" {
         case "registered":
             if let drive = o["drive"] as? String, drive != task.submission.drive.id { disconnect(task, "登记回执的光驱不符，已请求停止，临时照片保留。"); break }
+            task.registeredID = o["id"] as? String ?? ""
             task.registered = true; task.status = "已登记盘号 \(o["id"] as? String ?? "")，等待核对或导盘。"
             // Delete only this application's newly-created temp JPEG, after backend confirms registration.
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("DiscArchivePhotos", isDirectory: true).standardizedFileURL.path + "/"
@@ -251,7 +271,14 @@ private final class DeskMenuAction: NSObject {
             // VisionPane is a single cancellable operation. Serialize OCR/model requests across drives.
             recognitionQueue.append((task, URL(fileURLWithPath: path))); runNextRecognition()
         case "match", "project": task.pending = o; task.status = "等待人工选择（其他光驱继续运行）。"; showNextInteraction()
-        case "result": task.entry = o["entry"] as? IPCObject; task.gotResult = true; task.status = "任务结束：\(task.entry?["Status"] as? String ?? "请核对回执")"; refreshCatalog()
+        case "result":
+            task.entry = o["entry"] as? IPCObject; task.gotResult = true
+            task.ejectNote = o["ejectNote"] as? String ?? ""
+            task.status = "任务结束：\(task.entry?["Status"] as? String ?? "请核对回执")"
+            if !task.ejectNote.isEmpty { task.status += "\n" + task.ejectNote }
+            else if o["ejectAccepted"] as? Bool == false { task.status += "\n未确认弹盘成功，请核对托盘状态。" }
+            if isRetryable(task.entry) { task.status += "\n放回原盘后可点“重试所选光驱原盘（无需重拍）”。" }
+            refreshCatalog()
         case "error": task.hadError = true; task.status = o["text"] as? String ?? "任务遇到错误，照片和回执保留。"
         default: task.status = "收到未识别的任务事件，请查看回执。"
         }
@@ -277,7 +304,8 @@ private final class DeskMenuAction: NSObject {
         if !task.gotResult { task.status = "进程已结束（\(code)），\(task.registered ? "请查看已登记盘的回执" : "未确认登记成功，原照片保留")。"; if !diagnostic.isEmpty { task.log += String(diagnostic.prefix(2000)) + "\n" } }
         task.log += task.status + "\n"
         if recognizing === task { vision.cancel() }
-        let content = UNMutableNotificationContent(); content.title = "\(task.submission.drive.name) 任务结束"; content.body = task.status; content.sound = .default
+        let content = UNMutableNotificationContent(); content.title = "\(task.submission.drive.name) 任务结束"; content.body = task.status; content.sound = .default; content.userInfo = ["drive": task.submission.drive.id, "task": task.identity, "entry": task.entry?["Id"] as? String ?? ""]
+        content.categoryIdentifier = notificationCategory(for: task)
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         overall.stringValue = "\(task.submission.drive.name)：\(task.status)"; vision.setEditable(!jobs.values.contains { $0.process != nil }); refreshCatalog(); rebuildDriveMenu(); showSelectedTask(); maybeQuit()
     }
@@ -329,48 +357,212 @@ private final class DeskMenuAction: NSObject {
 
     @objc private func refreshCatalog() {
         guard !catalogLoading else { return }; catalogLoading = true
-        CoreIPC.run("list") { [weak self] r in guard let self = self else { return }; self.catalogLoading = false; switch r { case .success(let o): self.entries = o["entries"] as? [IPCObject] ?? []; self.filterCatalog(); case .failure(let e): self.recordNote.stringValue = e.localizedDescription } }
+        CoreIPC.run("list") { [weak self] r in guard let self = self else { return }; self.catalogLoading = false; switch r { case .success(let o): self.applyCatalog(o); case .failure(let e): self.recordNote.stringValue = e.localizedDescription } }
     }
+    private func applyCatalog(_ o: IPCObject) { entries = o["entries"] as? [IPCObject] ?? []; importedNote.stringValue = "本机已导 \(o["importedCount"] as? Int ?? 0) 张"; filterCatalog(); showSelectedTask() }
     func controlTextDidChange(_ obj: Notification) { if obj.object as? NSSearchField === search { filterCatalog() } }
-    private func filterCatalog() { let term = search.stringValue.lowercased(); filtered = entries.filter { e in term.isEmpty || ["Id", "Title", "Project", "Status"].contains { (e[$0] as? String ?? "").lowercased().contains(term) } }; table.reloadData() }
+    @objc private func toggleHiddenFilter() { filterCatalog() }
+    private func catalogText(_ e: IPCObject, _ key: String) -> String {
+        let title = e["Title"] as? String ?? "", project = e["Project"] as? String ?? "", id = e["Id"] as? String ?? ""
+        let usefulTitle = title == id ? "" : title
+        let primary = project.isEmpty ? usefulTitle : project
+        if key == "Primary" { return primary }
+        if key == "Alternate" { return usefulTitle.caseInsensitiveCompare(primary) == .orderedSame ? "" : usefulTitle }
+        if e["ManualOnly"] as? Bool == true { if key == "Status" { return "手工补录" }; if key == "TargetName" { return "仅本机登记" } }
+        return e[key] as? String ?? ""
+    }
+    private func filterCatalog() {
+        let oldSelection = selectedEntry?["Id"] as? String
+        let keep = requestedCatalogSelection ?? oldSelection, term = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        requestedCatalogSelection = nil
+        let typedTitle = editTitle.stringValue, typedProject = editProject.stringValue
+        filtered = entries.filter { e in
+            (e["HiddenFromCatalog"] as? Bool ?? false) == (showHidden.state == .on) &&
+            (term.isEmpty || ["Id", "Title", "Project", "Status", "TargetName", "TitleState"].contains { catalogText(e, $0).lowercased().contains(term) })
+        }
+        table.reloadData()
+        if let i = filtered.firstIndex(where: { ($0["Id"] as? String) == keep }) {
+            table.selectRowIndexes(IndexSet(integer: i), byExtendingSelection: false)
+            // Other drives may finish while labels are being edited. Keep the user's text.
+            if keep == oldSelection { editTitle.stringValue = typedTitle; editProject.stringValue = typedProject }
+            else { tableViewSelectionDidChange(Notification(name: NSTableView.selectionDidChangeNotification, object: table)) }
+        }
+        else { table.deselectAll(nil); editTitle.stringValue = ""; editProject.stringValue = ""; preview.image = nil; recordNote.stringValue = "选择登记后可改标签、续导或查看回执。" }
+    }
     func numberOfRows(in tableView: NSTableView) -> Int { filtered.count }
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? { guard filtered.indices.contains(row) else { return nil }; return label(filtered[row][tableColumn?.identifier.rawValue ?? ""] as? String ?? "") }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? { guard filtered.indices.contains(row) else { return nil }; return label(catalogText(filtered[row], tableColumn?.identifier.rawValue ?? "")) }
     private var selectedEntry: IPCObject? { filtered.indices.contains(table.selectedRow) ? filtered[table.selectedRow] : nil }
-    func tableViewSelectionDidChange(_ notification: Notification) { guard let e = selectedEntry else { return }; editTitle.stringValue = e["Title"] as? String ?? ""; editProject.stringValue = e["Project"] as? String ?? ""; recordNote.stringValue = "\(e["Id"] as? String ?? "") · \(e["Status"] as? String ?? "")"; preview.image = (e["Photo"] as? String).flatMap { NSImage(contentsOfFile: $0) } }
-    @objc private func saveLabels() { guard let e = selectedEntry, let id = e["Id"] as? String else { return }; CoreIPC.run("edit", ["id": id, "title": editTitle.stringValue, "project": editProject.stringValue]) { [weak self] r in switch r { case .success: self?.refreshCatalog(); case .failure(let error): self?.notice(error.localizedDescription) } } }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let e = selectedEntry else { return }
+        editTitle.stringValue = e["Title"] as? String ?? ""; editProject.stringValue = e["Project"] as? String ?? ""
+        let hidden = e["HiddenFromCatalog"] as? Bool ?? false
+        editTitle.isEditable = !hidden; editProject.isEditable = !hidden
+        recordNote.stringValue = "盘号：\(e["Id"] as? String ?? "") · \(e["Status"] as? String ?? "")\n" + (hidden ? "已从本机列表移除；照片、素材和回执保留，可恢复。" : e["ManualOnly"] as? Bool == true ? "仅本机补录，无归档文件。" : "修改标签不重命名归档目录。")
+        preview.image = (e["Photo"] as? String).flatMap { NSImage(contentsOfFile: $0) }
+    }
+    @objc private func saveLabels() { guard let e = selectedEntry, e["HiddenFromCatalog"] as? Bool != true, let id = e["Id"] as? String else { return }; CoreIPC.run("edit", ["id": id, "title": editTitle.stringValue, "project": editProject.stringValue]) { [weak self] r in switch r { case .success: self?.refreshCatalog(); case .failure(let error): self?.notice(error.localizedDescription) } } }
+    @objc private func addManual() {
+        let title = NSTextField(string: ""), project = NSTextField(string: ""); stretch(title, width: 360); stretch(project, width: 360)
+        let alert = NSAlert(); alert.messageText = "手工补录"; alert.informativeText = "只在本机登记，不启动导盘、不创建归档文件。标题和项目至少填写一项。"; alert.accessoryView = column([label("标题"), title, label("项目"), project]); alert.addButton(withTitle: "保存补录"); alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] r in
+            guard let self = self, r == .alertFirstButtonReturn else { return }
+            guard !title.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !project.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { self.notice("标题和项目至少填写一项。"); return }
+            CoreIPC.run("addManual", ["title": title.stringValue, "project": project.stringValue]) { [weak self] r in switch r { case .success(let o): self?.requestedCatalogSelection = (o["entry"] as? IPCObject)?["Id"] as? String; self?.showHidden.state = .off; self?.search.stringValue = ""; self?.refreshCatalog(); case .failure(let e): self?.notice(e.localizedDescription) } }
+        }
+    }
+    @objc private func hideSelected() { setSelectedHidden(true) }
+    @objc private func restoreSelected() { setSelectedHidden(false) }
+    private func setSelectedHidden(_ hidden: Bool) {
+        guard let entry = selectedEntry, let id = entry["Id"] as? String, (entry["HiddenFromCatalog"] as? Bool ?? false) != hidden else { return }
+        guard !jobs.values.contains(where: { $0.process != nil && (($0.entry?["Id"] as? String) == id || $0.registeredID == id || $0.submission.resumeId == id) }) else { notice("此盘仍在工作，请结束后再移除或恢复。"); return }
+        let alert = NSAlert(); alert.messageText = hidden ? "从本机列表移除 \(id)？" : "恢复到本机列表 \(id)？"; alert.informativeText = "只改变本机列表显示；照片、已导素材与硬盘回执均保留。"; alert.addButton(withTitle: hidden ? "从本机移除" : "恢复到本机列表"); alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] r in guard r == .alertFirstButtonReturn else { return }; CoreIPC.run("setHidden", ["id": id, "hidden": hidden]) { result in switch result { case .success: self?.refreshCatalog(); case .failure(let e): self?.notice(e.localizedDescription) } } }
+    }
     @objc private func exportLocal() { export(command: "export") }
     @objc private func exportTarget() { guard !targetField.stringValue.isEmpty else { notice("请先在导盘页选择归档目录。"); return }; export(command: "exportTarget") }
     private func export(command: String) { let p = NSSavePanel(); p.title = "导出CSV登记表"; p.nameFieldStringValue = "光盘登记册.csv"; let target = targetField.stringValue; p.beginSheetModal(for: window) { [weak self] r in guard r == .OK, let url = p.url else { return }; CoreIPC.run(command, ["target": target, "path": url.path]) { result in switch result { case .success: self?.notice("登记表已导出：\(url.path)"); case .failure(let error): self?.notice(error.localizedDescription) } } } }
-    @objc private func resumeSelected() {
-        guard let entry = selectedEntry, let id = entry["Id"] as? String, let photo = entry["Photo"] as? String else { return }
-        let alert = NSAlert(); alert.messageText = "以原盘号核对/续导 \(id)"; alert.informativeText = "先选择原目标目录和当前光驱，放入原盘。继续前须人工核对实体盘与登记照片一致。不会自动转移到其他盘号或驱动。"; alert.addButton(withTitle: "已核对原盘，续导"); alert.addButton(withTitle: "取消")
-        alert.beginSheetModal(for: window) { [weak self] r in guard let self = self, r == .alertFirstButtonReturn else { return }; do { self.manualCheck.state = .on; let s = try self.snapshot(resume: id); self.start(photo: URL(fileURLWithPath: photo), submission: s, ownTemporary: false) } catch { self.notice(error.localizedDescription) } }
+    private func isRetryable(_ entry: IPCObject?) -> Bool {
+        guard let e = entry, e["ManualOnly"] as? Bool != true, e["HiddenFromCatalog"] as? Bool != true else { return false }
+        if let current = entries.first(where: { ($0["Id"] as? String) == (e["Id"] as? String) }), current["HiddenFromCatalog"] as? Bool == true { return false }
+        return ["部分拷出", "待复查"].contains(e["Status"] as? String ?? "")
     }
-    @objc private func openProject() { guard let e = selectedEntry else { return }; let root = e["TargetRoot"] as? String ?? ""; let folders = e["ArchiveFolders"] as? [String] ?? []; let candidates = folders.map { $0.hasPrefix("/") ? $0 : URL(fileURLWithPath: root).appendingPathComponent($0).path }; openPaths(candidates.isEmpty ? [e["JobDir"] as? String ?? ""] : candidates) }
-    @objc private func openReceipt() { guard let e = selectedEntry else { return }; openPaths([e["Report"] as? String ?? e["JobDir"] as? String ?? ""]) }
+    @objc private func resumeSelected() {
+        guard let entry = selectedEntry, entry["ManualOnly"] as? Bool != true, entry["HiddenFromCatalog"] as? Bool != true else { notice("手工补录或已移除的登记不能导盘。请先恢复已移除项。"); return }
+        confirmResume(entry, expectedTask: nil)
+    }
+    @objc private func retrySelectedTask() {
+        guard let task = jobs[selectedDrive], task.process == nil, isRetryable(task.entry), let entry = task.entry else { return }
+        confirmResume(entry, expectedTask: task)
+    }
+    private func confirmResume(_ entry: IPCObject, expectedTask: DeskTask?) {
+        guard !retryChecking, !closing, let id = entry["Id"] as? String, let photo = entry["Photo"] as? String, !photo.isEmpty else { notice("没有可复用的原照片，请查看回执。"); return }
+        if let current = entries.first(where: { $0["Id"] as? String == id }), current["HiddenFromCatalog"] as? Bool == true || current["ManualOnly"] as? Bool == true { notice("此登记已移除或为手工项，不能导盘。"); return }
+        guard !jobs.values.contains(where: { $0.process != nil && (($0.entry?["Id"] as? String) == id || $0.registeredID == id || $0.submission.resumeId == id) }) else { notice("原盘号已在其他光驱工作，不能同时续导。"); return }
+        let driveID = selectedDrive, expectedIdentity = jobs[selectedDrive]?.identity
+        if let task = expectedTask { guard jobs[driveID] === task else { return } }
+        guard !driveID.isEmpty, jobs[driveID]?.process == nil, let drive = drives.first(where: { $0.id == driveID }), drive.ready && !drive.empty else { notice("请把原盘 \(id) 放入当前所选光驱，等待识盘后重试；无需重新拍照。"); return }
+        // Freeze the chosen drive and original target before displaying the human confirmation.
+        // A catalog refresh, drive switch, or replacement task cannot redirect this callback.
+        let previousCheck = manualCheck.state; manualCheck.state = .on
+        let frozen: DeskSubmission
+        do { frozen = try snapshot(resume: id) } catch { manualCheck.state = previousCheck; notice(error.localizedDescription); return }
+        manualCheck.state = previousCheck
+        let target = entry["TargetRoot"] as? String ?? ""
+        guard !target.isEmpty, target == frozen.target else { notice("请先在导盘页选择原归档目录：\(target)。续导沿用原盘号和照片。"); return }
+        retryChecking = true; showSelectedTask()
+        let alert = NSAlert(); alert.messageText = "以原盘号核对/续导 \(id)"
+        alert.informativeText = "将保留当前所选光驱 \(drive.name)。请确认其中实物确实为原盘 \(id)，与原照片一致。沿用原登记与回执，检查完整文件并重新读取未完成项，无需重拍。如果已经换盘，请取消并重新登记。"; alert.addButton(withTitle: "已核对原盘，续导"); alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] r in
+            guard let self = self else { return }; self.retryChecking = false; self.showSelectedTask()
+            guard r == .alertFirstButtonReturn, !self.closing, self.selectedDrive == driveID, self.jobs[driveID]?.process == nil else { return }
+            guard self.jobs[driveID]?.identity == expectedIdentity else { return }
+            // Query devices once more: a tray may change between timer ticks while the sheet is open.
+            CoreIPC.run("devices") { [weak self] result in
+                guard let self = self, self.selectedDrive == driveID, self.jobs[driveID]?.process == nil, !self.closing else { return }
+                guard self.jobs[driveID]?.identity == expectedIdentity else { return }
+                guard case .success(let o) = result,
+                      let current = (o["drives"] as? [IPCObject] ?? []).map(DeskDrive.init).first(where: { $0.id == driveID }), current.ready, !current.empty, current.mediaHint == frozen.drive.mediaHint else { self.notice("确认期间光驱或盘片状态变化，请重新核对后再试；原照片保留。"); return }
+                self.drives = (o["drives"] as? [IPCObject] ?? []).map(DeskDrive.init); self.targets = o["targets"] as? [IPCObject] ?? []
+                self.tabs.selectTabViewItem(at: 0); self.start(photo: URL(fileURLWithPath: photo), submission: frozen, ownTemporary: false)
+            }
+        }
+    }
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) { capture?.setCameraPageActive(tabViewItem?.label == "摄像头") }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completionHandler: @escaping () -> Void) {
+        let info = response.notification.request.content.userInfo
+        let drive = info["drive"] as? String ?? "", identity = info["task"] as? String ?? "", entry = info["entry"] as? String ?? ""
+        let action = response.actionIdentifier
+        Task { @MainActor [weak self] in
+            guard let self = self else { completionHandler(); return }
+            guard action == UNNotificationDefaultActionIdentifier || action == Self.retryNotificationAction else { completionHandler(); return }
+            self.window.deminiaturize(nil); self.window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); self.tabs.selectTabViewItem(at: 0)
+            if let task = self.notificationTask(drive: drive, identity: identity, entry: entry, action: action) {
+                // Default clicks only display results; explicit retry still requires the original-disc confirmation.
+                self.selectedDrive = drive; self.manualCheck.state = .off; self.rebuildDriveMenu(); self.showSelectedTask()
+                if action == Self.retryNotificationAction, let original = task.entry { self.confirmResume(original, expectedTask: task) }
+            } else { self.notice("这条通知对应的任务已被替换或当前不可重试，请在登记册按盘号 \(entry) 查阅；不会操作当前任务。") }
+            completionHandler()
+        }
+    }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) { completionHandler([.banner, .sound]) }
+    private func notificationCategory(for task: DeskTask) -> String {
+        task.gotResult && task.process == nil && isRetryable(task.entry) ? Self.retryNotificationCategory : ""
+    }
+    private func notificationTask(drive: String, identity: String, entry: String, action: String = UNNotificationDefaultActionIdentifier) -> DeskTask? {
+        guard action == UNNotificationDefaultActionIdentifier || action == Self.retryNotificationAction,
+              let task = jobs[drive], task.identity == identity, (task.entry?["Id"] as? String ?? "") == entry else { return nil }
+        if action == Self.retryNotificationAction { guard !closing, !retryChecking, !notificationCategory(for: task).isEmpty else { return nil } }
+        return task
+    }
+
+    // Run only from the packaged --check-workbench entry point. This uses the isolated
+    // real catalog and real AppKit controls; synthetic tasks never invoke a drive job.
+    func checkWorkbenchFeatures(completion: @escaping (Result<String, Error>) -> Void) {
+        guard MacBundle.checkingWorkbench,
+              MacBundle.state.lastPathComponent.hasPrefix("DiscArchive-check-"),
+              MacBundle.state.path.hasPrefix(FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path) else { completion(.failure(CaptureFailure("UI 自查只允许临时登记目录。"))); return }
+        timer?.invalidate()
+        Task { @MainActor in
+            func command(_ name: String, _ payload: IPCObject = [:]) async throws -> IPCObject {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<IPCObject, Error>) in CoreIPC.run(name, payload) { continuation.resume(with: $0) } }
+            }
+            func require(_ condition: Bool, _ text: String) throws { if !condition { throw CaptureFailure(text) } }
+            do {
+                let initial = try await command("list"); applyCatalog(initial)
+                try require(entries.isEmpty && initial["importedCount"] as? Int == 0 && importedNote.stringValue == "本机已导 0 张", "临时登记目录不是空目录或计数回执缺失。")
+                let added = try await command("addManual", ["title": "UI核验项目", "project": "UI核验项目"])
+                guard let entry = added["entry"] as? IPCObject, let id = entry["Id"] as? String else { throw CaptureFailure("补录未返回盘号。") }
+                requestedCatalogSelection = id; applyCatalog(try await command("list"))
+                try require(filtered.count == 1 && table.numberOfRows == 1 && selectedEntry?["Id"] as? String == id, "补录未出现在登记册或未选中。")
+                try require(importedNote.stringValue == "本机已导 0 张" && !isRetryable(entry), "手工项被当作已导或可重试项。")
+                try require(catalogText(entry, "Primary") == "UI核验项目" && catalogText(entry, "Alternate").isEmpty, "相同项目和标题未折叠。")
+                try require(!table.tableColumns.contains(where: { ["Id", "Drive"].contains($0.identifier.rawValue) }), "盘号或历史光驱仍在列表列中。")
+                _ = try await command("edit", ["id": id, "title": "修改后的标题", "project": "修改后的项目"])
+                applyCatalog(try await command("list"))
+                try require(entries.first?["Title"] as? String == "修改后的标题" && entries.first?["Project"] as? String == "修改后的项目", "补录标签编辑未保存。")
+                search.stringValue = id; filterCatalog(); try require(filtered.count == 1, "移到详情的盘号不能搜索。")
+                _ = try await command("setHidden", ["id": id, "hidden": true]); applyCatalog(try await command("list"))
+                try require(filtered.isEmpty && entries.count == 1 && importedNote.stringValue == "本机已导 0 张", "移除未隐藏登记，或错误改变本机已导数。")
+                showHidden.state = .on; filterCatalog(); try require(filtered.count == 1, "查看已移除未显示登记。")
+                _ = try await command("setHidden", ["id": id, "hidden": false]); applyCatalog(try await command("list")); try require(filtered.isEmpty, "恢复项仍在已移除列表。")
+                showHidden.state = .off; search.stringValue = ""; filterCatalog(); try require(filtered.count == 1, "恢复项未回到正常列表。")
+                let fakeDrive = DeskDrive(["id": "ui-check-drive", "name": "虚拟自查光驱"])
+                let submission = DeskSubmission(drive: fakeDrive, target: MacBundle.state.path, targetDeviceId: nil, project: "", existingProject: nil, mode: "metadata", view: "auto", resumeId: nil)
+                let old = DeskTask(submission), replacement = DeskTask(submission); old.entry = entry; replacement.entry = entry
+                jobs[fakeDrive.id] = replacement
+                defer { jobs.removeValue(forKey: fakeDrive.id) }
+                let previousDrive = selectedDrive
+                try require(notificationTask(drive: fakeDrive.id, identity: old.identity, entry: id) == nil, "过期通知命中了替换后的任务。")
+                try require(notificationTask(drive: "another-drive", identity: replacement.identity, entry: id) == nil, "通知跨驱命中任务。")
+                try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "wrong-entry") == nil, "通知未验证原盘号。")
+                try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: id) === replacement && selectedDrive == previousDrive, "通知路由改变了当前光驱或没有命中正确任务。")
+                try require(notificationCategory(for: replacement).isEmpty && notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: id, action: Self.retryNotificationAction) == nil, "手工项通知错误提供重试。")
+                var retryEntry: IPCObject = ["Id": "ui-check-original", "Status": "部分拷出", "ManualOnly": false, "HiddenFromCatalog": false]
+                replacement.entry = retryEntry; replacement.gotResult = true
+                for status in ["部分拷出", "待复查"] {
+                    retryEntry["Status"] = status; replacement.entry = retryEntry
+                    try require(notificationCategory(for: replacement) == Self.retryNotificationCategory, "可重试结果未提供通知类别。")
+                    for action in [UNNotificationDefaultActionIdentifier, Self.retryNotificationAction] {
+                        try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "ui-check-original", action: action) === replacement, "有效通知动作被拒绝。")
+                        try require(notificationTask(drive: fakeDrive.id, identity: old.identity, entry: "ui-check-original", action: action) == nil, "过期通知动作命中了替换任务。")
+                        try require(notificationTask(drive: "another-drive", identity: replacement.identity, entry: "ui-check-original", action: action) == nil, "通知动作跨驱命中。")
+                        try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "wrong-entry", action: action) == nil, "通知动作未验证盘号。")
+                    }
+                }
+                retryEntry["Status"] = "已拷出"; replacement.entry = retryEntry
+                try require(notificationCategory(for: replacement).isEmpty && notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "ui-check-original", action: Self.retryNotificationAction) == nil, "已完成任务错误接受通知重试。")
+                try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "ui-check-original") === replacement, "普通结果默认点击无法查看。")
+                retryEntry["Status"] = "部分拷出"; retryEntry["HiddenFromCatalog"] = true; replacement.entry = retryEntry
+                try require(notificationCategory(for: replacement).isEmpty, "已移除任务错误提供通知重试。")
+                try require(notificationTask(drive: fakeDrive.id, identity: replacement.identity, entry: "ui-check-original", action: "unknown-action") == nil && selectedDrive == previousDrive, "未知动作被接受或通知门禁改变当前驱动。")
+                completion(.success("PASS packaged AppKit catalog: manual add, count, duplicate title folding, label edit, ID search, local hide/restore; notification default/retry category and stale-task/drive/entry/action guards (synthetic routing only)"))
+            } catch { completion(.failure(error)) }
+        }
+    }
+    @objc private func openProject() { guard let e = selectedEntry, e["ManualOnly"] as? Bool != true, e["HiddenFromCatalog"] as? Bool != true else { return }; let root = e["TargetRoot"] as? String ?? ""; let folders = e["ArchiveFolders"] as? [String] ?? []; let candidates = folders.map { $0.hasPrefix("/") ? $0 : URL(fileURLWithPath: root).appendingPathComponent($0).path }; openPaths(candidates.isEmpty ? [e["JobDir"] as? String ?? ""] : candidates) }
+    @objc private func openReceipt() { guard let e = selectedEntry, e["ManualOnly"] as? Bool != true, e["HiddenFromCatalog"] as? Bool != true else { return }; openPaths([e["Report"] as? String ?? e["JobDir"] as? String ?? ""]) }
     private func openPaths(_ paths: [String]) { let paths = paths.filter { !$0.isEmpty && FileManager.default.fileExists(atPath: $0) }; guard !paths.isEmpty else { notice("目录或回执不在线，请接回原归档卷。"); return }; if paths.count == 1 { NSWorkspace.shared.open(URL(fileURLWithPath: paths[0])); return }; let alert = NSAlert(); let menu = NSPopUpButton(); menu.addItems(withTitles: paths); alert.messageText = "选择要打开的项目目录"; alert.accessoryView = menu; alert.addButton(withTitle: "打开"); alert.addButton(withTitle: "取消"); alert.beginSheetModal(for: window) { r in if r == .alertFirstButtonReturn, let path = menu.titleOfSelectedItem { NSWorkspace.shared.open(URL(fileURLWithPath: path)) } } }
     @objc private func showEvidence() { guard let e = selectedEntry else { return }; let text = ["DiscLabel", "PhotoText", "SourceFormat", "VisionNote", "NamingReason", "CanonicalId", "IdentityEvidence", "CloseWarning"].map { "\($0)：\(e[$0] ?? "")" }.joined(separator: "\n\n"); notice(text) }
 
-    @objc private func chooseWatchFolder() {
-        guard !selectedDrive.isEmpty else { notice("先选择需要固定绑定的光驱。"); return }
-        let bound = selectedDrive; let p = NSOpenPanel(); p.title = "选择照片接收文件夹（只接收启用后新增的一张照片）"; p.canChooseDirectories = true; p.canChooseFiles = false
-        p.beginSheetModal(for: window) { [weak self] r in guard let self = self, r == .OK, let url = p.url else { return }; self.watchFolder = url; self.watchDrive = bound; self.watchCandidate = nil; self.watchSeen = Set(self.folderPhotos(url).map { $0.path }); self.watchNote.stringValue = "接收中：\(url.path) → 固定光驱 \(bound)。其他光驱不会接收这里的照片。" }
-    }
-    private func folderPhotos(_ folder: URL) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey], options: [.skipsHiddenFiles])) ?? []).filter { ["jpg", "jpeg", "png", "heic"].contains($0.pathExtension.lowercased()) } }
-    private func disableWatch() { watchFolder = nil; watchDrive = nil; watchSeen.removeAll(); watchCandidate = nil; watchNote.stringValue = "照片文件夹接收已停止。" }
-    @objc private func stopWatch() { disableWatch() }
-    private func pollPhotoFolder() {
-        guard let folder = watchFolder, let bound = watchDrive, !closing else { return }
-        let new = folderPhotos(folder).filter { !watchSeen.contains($0.path) }
-        guard !new.isEmpty else { return }
-        if new.count > 1 { watchNote.stringValue = "新增多张照片，已暂停接收以避免盘片串配。请逐张选择照片登记。"; watchFolder = nil; return }
-        let url = new[0]; guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]), values.isRegularFile == true, let size = values.fileSize, size > 0, let changed = values.contentModificationDate else { return }
-        guard let candidate = watchCandidate, candidate.0 == url.path, candidate.1 == UInt64(size), Date().timeIntervalSince(candidate.2) > 2, Date().timeIntervalSince(changed) > 2 else { watchCandidate = (url.path, UInt64(size), Date()); return }
-        // Never use the currently selected replacement drive. A sheet pins the original binding for human review.
-        watchSeen.insert(url.path); watchCandidate = nil; watchFolder = nil
-        watchNote.stringValue = "收到一张照片，接收已暂停；核对并登记后可重新启用。"
-        let alert = NSAlert(); alert.messageText = "收到照片：\(url.lastPathComponent)"; alert.informativeText = "固定绑定光驱 \(bound)。请核对照片与该光驱实体盘。继续将切回此驱动，不影响其他任务。"; alert.addButton(withTitle: "已核对，登记这张"); alert.addButton(withTitle: "保留照片，不登记")
-        alert.beginSheetModal(for: window) { [weak self] r in guard let self = self, r == .alertFirstButtonReturn else { return }; self.selectedDrive = bound; self.rebuildDriveMenu(); self.manualCheck.state = .on; self.importPhoto(url); self.showSelectedTask() }
-    }
     private func notice(_ text: String) { let alert = NSAlert(); alert.messageText = "光盘归档"; alert.informativeText = String(text.prefix(8000)); alert.addButton(withTitle: "知道了"); alert.beginSheetModal(for: window) }
 }

@@ -2,6 +2,7 @@
 *.cs text eol=crlf
 *.ps1 text eol=crlf
 *.md text eol=lf
+使用说明.txt text eol=crlf
 LICENSE text eol=lf
 *.zip binary
 *.dll binary

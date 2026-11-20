@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -47,6 +47,8 @@ namespace DiscArchive
         private static void Check(bool yes,string name) { if(!yes) throw new Exception(name); checks++; Console.WriteLine("PASS " + name); }
         private static T Field<T>(MainForm form,string name) { return (T)typeof(MainForm).GetField(name,Private).GetValue(form); }
         private static void Call(MainForm form,string name,params object[] args) { typeof(MainForm).GetMethod(name,Private).Invoke(form,args); }
+        private static void SelectPhoto(MainForm form,string path)
+        { typeof(MainForm).GetMethod("Register",Private,null,new[]{typeof(string)},null).Invoke(form,new object[]{path}); }
         private static void Spin(Func<bool> until, int seconds=14)
         {
             Stopwatch time=Stopwatch.StartNew();
@@ -85,7 +87,7 @@ namespace DiscArchive
                 string root=Path.Combine(Path.GetTempPath(),"DiscArchive-Workflow-"+Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
                 string source=Directory.CreateDirectory(Path.Combine(root,"test-data-CD")).FullName;
                 string disk=Directory.CreateDirectory(Path.Combine(root,"test-target")).FullName;
-                string inbox=Directory.CreateDirectory(Path.Combine(root,"photo-inbox")).FullName;
+                string photos=Directory.CreateDirectory(Path.Combine(root,"photo-fixtures")).FullName;
                 string local=Path.Combine(root,"state");
                 string label=Path.Combine(root,"label.jpg");
                 using(Bitmap b=new Bitmap(1200,600)) using(Graphics g=Graphics.FromImage(b))
@@ -94,7 +96,7 @@ namespace DiscArchive
                 }
                 Directory.CreateDirectory(Path.Combine(source,"DCIM","空文件夹"));
                 string original=Path.Combine(source,"DCIM","00001.MTS"); File.WriteAllText(original,"simulated bytes / 早年摄像");
-                File.Copy(label,Path.Combine(inbox,"older.jpg"));
+                File.Copy(label,Path.Combine(photos,"older.jpg"));
                 SimulatedDrive reader=new SimulatedDrive{Source=source};
                 Application.EnableVisualStyles();
                 Rectangle outside=SystemInformation.VirtualScreen;
@@ -110,12 +112,12 @@ namespace DiscArchive
                     station.ChooseMatch=delegate { return System.Threading.Tasks.Task.FromResult<DiscMatch>(null); };
                     Check(Field<VisionOptions>(f,"vision").Mode=="metadata","default archive needs no model, connection or OCR");
                     Field<VisionOptions>(f,"vision").Mode="ocr";
-                    Call(f,"BeginWatch",inbox); WaitMs(1700);
-                    Check(station.Current==null&&station.Book.List().Count==0,"pre-existing photo is not bound");
-                    File.Copy(label,Path.Combine(inbox,"fresh.jpg"));
-                    Spin(delegate {return station.Current!=null;});
+                    WaitMs(1700);
+                    Check(station.Current==null&&station.Book.List().Count==0,"photos on disk require explicit selection");
+                    string selectedPhoto=Path.Combine(photos,"fresh.jpg"); File.Copy(label,selectedPhoto);
+                    SelectPhoto(f,selectedPhoto);
                     Entry first=station.Current;
-                    Check(first.Status==Workstation.Waiting && station.EmptySeen && reader.Runs==0,"fresh photo receives one ID before disc insertion");
+                    Check(first.Status==Workstation.Waiting && station.EmptySeen && reader.Runs==0,"manually selected photo receives one ID before disc insertion");
                     Check(File.ReadAllBytes(label).SequenceEqual(File.ReadAllBytes(first.OriginalPhoto)) && File.Exists(first.Photo),"archive holds original photo and registry holds preview");
                     Snap(f,Path.Combine(root,"capture-screen.png"));
                     string dcim=Path.Combine(disk,"130708-星河访谈素材","DCIM");
@@ -149,8 +151,8 @@ namespace DiscArchive
                     Field<TextBox>(f,"search").Text="虚构庆典"; Check(Field<DataGridView>(f,"grid").Rows.Count==1,"catalog search finds corrected title");
                     Snap(f,Path.Combine(root,"catalog-screen.png"));
                     Field<TextBox>(f,"search").Text=""; Field<TabControl>(f,"tabs").SelectedIndex=0;
-                    File.Copy(label,Path.Combine(inbox,"next.jpg"));
-                    Spin(delegate {return station.Current!=null;});
+                    string nextPhoto=Path.Combine(photos,"next.jpg"); File.Copy(label,nextPhoto);
+                    SelectPhoto(f,nextPhoto);
                     Entry second=station.Current; WaitMs(2100);
                     Check(!station.EmptySeen && reader.Runs==1 && second.Id!=done.Id,"previous disc still in drive cannot be paired with next photo");
                     reader.Loaded=false; Spin(delegate{return station.EmptySeen;});
@@ -167,9 +169,9 @@ namespace DiscArchive
                     Entry redone=station.Book.List().Single(e=>e.Id==second.Id);
                     Check(redone.Status==Workstation.Done && redone.Files==2 && Directory.GetDirectories(redone.JobDir).Length==attemptsBefore+1 && station.Book.List().Count==2,"retry preserves disc ID, old report, and previously recovered content");
                     Check(File.Exists(saved) && File.ReadAllText(saved).Contains("simulated bytes"),"earlier project files survive a same-name disc and retry");
-                    File.Copy(label,Path.Combine(inbox,"batch1.jpg")); File.Copy(label,Path.Combine(inbox,"batch2.jpg"));
-                    Spin(delegate {return Field<FileSystemWatcher>(f,"watcher")==null;});
-                    Check(station.Current==null && station.Book.List().Count==2,"multiple new photos pause automatic pairing");
+                    File.Copy(label,Path.Combine(photos,"batch1.jpg")); File.Copy(label,Path.Combine(photos,"batch2.jpg"));
+                    WaitMs(1700);
+                    Check(station.Current==null && station.Book.List().Count==2,"new files cannot create a registration without an explicit photo action");
                     string csv=Path.Combine(root,"登记总表.csv"); station.Book.Export(csv);
                     Check(File.ReadAllText(csv).Contains("虚构庆典 B机 第2盘"),"CSV contains confirmed title");
                     reader.Loaded=false;

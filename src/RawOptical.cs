@@ -99,6 +99,7 @@ namespace DiscArchive
         }
 
         public void Verify() { lease.Verify(); }
+        internal IOpticalEjectTicket CreateEjectTicket() {return lease.CreateEjectTicket();}
         public void Dispose() { Data.Dispose(); }
     }
 

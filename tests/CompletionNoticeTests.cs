@@ -19,7 +19,7 @@ internal static class CompletionNoticeTests
     private static int checks;
     private static void Check(bool ok, string name)
     {
-        if (!ok) throw new Exception(name);
+        if (!ok) { Console.Error.WriteLine("FAIL " + name); throw new Exception(name); }
         checks++;
         Console.WriteLine("PASS " + name);
     }
@@ -140,6 +140,44 @@ internal static class CompletionNoticeTests
             Check(DriveWindow(notice) == null, "late drive completion cannot reopen a closed owner");
         }
         using (Form owner = new SyntheticOwner())
+        using (CompletionNotice notice = new CompletionNotice(delegate { return offscreen; }, 300))
+        {
+            owner.StartPosition=FormStartPosition.Manual;owner.Location=offscreen.Location;owner.ShowInTaskbar=false;owner.Show();
+            int x=0,y=0;
+            notice.ShowDrive(owner,"Z:","已拷出，未自动弹盘，请手动取盘","Project Z\r\n完整 8 个文件\r\n未自动弹盘，请手动取盘。",false);
+            notice.ShowDrive(owner,"X:","部分拷出","DISC-X",true,delegate {x++;});
+            notice.ShowDrive(owner,"Y:","部分拷出","DISC-Y",true,delegate {y++;});
+            Form actionable=DriveWindow(notice);
+            FlowLayoutPanel actions=(FlowLayoutPanel)actionable.Controls[4];
+            Label summaryText=(Label)actionable.Controls[1];
+            Console.WriteLine("DIAGNOSTIC actionable summary: window="+actionable.Size+" body="+summaryText.Size+" font="+summaryText.Font.Name+"/"+summaryText.Font.Size+" height="+summaryText.Font.Height+" text="+summaryText.Text.Replace("\r\n"," | "));
+            Check(((Label)actionable.Controls[1]).Text.Contains("未自动弹盘"),"multi-drive summary keeps failed auto-eject visible without hover");
+            Check(summaryText.Text.Contains("X:") && summaryText.Text.Contains("Y:") && summaryText.Text.Contains("Z:"),"compact summary shows all three drive outcomes before folding any drive");
+            Check(actionable.AccessibleDescription.Contains("Project Z") && actionable.AccessibleDescription.Contains("完整 8 个文件") && actionable.AccessibleDescription.Contains("DISC-X") && actionable.AccessibleDescription.Contains("DISC-Y"),"compact summary retains project, counts and all retry identities in full details");
+            Check(actions.Controls.Count==2,"each incomplete drive has its own retry action");
+            ((Button)actions.Controls[0]).PerformClick();
+            Check(x==1 && y==0 && DriveWindow(notice)!=null,"retry callback belongs only to clicked drive and retains peer result");
+            Check(((Button)actions.Controls[0]).Text.Contains("Y:"),"remaining retry identifies remaining drive");
+            notice.ClearDrive("Y:\\");
+            notice.ClearDrive("Z:");
+            Check(DriveWindow(notice)==null && y==0,"new task invalidation removes pending retry without executing it");
+            notice.ShowDrive(owner,"X:","部分拷出","old",true,delegate {x++;});
+            notice.ShowDrive(owner,"x:\\","已拷出","new",false);
+            Check(((FlowLayoutPanel)DriveWindow(notice).Controls[4]).Controls.Count==0,"same-drive replacement removes obsolete retry action");
+            Pump(700);
+            Check(DriveWindow(notice)==null && x==1 && y==0,"expiration clears actions without retrying a disc");
+            notice.ShowDrive(owner,"X:","部分拷出","old X",true,delegate {x++;});
+            Pump(300);
+            notice.ShowDrive(owner,"Y:","部分拷出","new Y",true,delegate {y++;});
+            Pump(240);
+            Form remaining=DriveWindow(notice);
+            FlowLayoutPanel remainingActions=remaining==null ? null : (FlowLayoutPanel)remaining.Controls[4];
+            Check(remainingActions!=null && remainingActions.Controls.Count==1 && ((Button)remainingActions.Controls[0]).Text.Contains("Y:"),"drive expiration removes only that drive retry and preserves newer action");
+            ((Button)remainingActions.Controls[0]).PerformClick();
+            Check(x==1 && y==1,"action retained after peer expiry still targets the correct drive");
+            owner.Close();
+        }
+        using (Form owner = new SyntheticOwner())
         using (CompletionNotice notice = new CompletionNotice(delegate { return offscreen; }, 1000))
         {
             owner.StartPosition = FormStartPosition.Manual;
@@ -147,7 +185,9 @@ internal static class CompletionNoticeTests
             owner.ShowInTaskbar = false;
             owner.Show();
             for (char drive = 'D'; drive <= 'Z'; drive++) notice.ShowDrive(owner, drive + ":", "已拷出", "合成项目", false);
+            notice.ShowDrive(owner,"Z:","已拷出，未自动弹盘，请手动取盘","保留原始完整提示",false);
             Form compact = DriveWindow(notice);
+            Check(((Label)compact.Controls[1]).Text.StartsWith("Z:  已拷出，未自动弹盘"),"overflow prioritizes required manual tray action before routine completions");
             Check(((Label)compact.Controls[1]).Text.Contains("另有") && ((Label)compact.Controls[2]).Text.Contains("空间有限"),
                 "limited space explicitly groups overflow drives");
             Check(compact.AccessibleDescription.Contains("D:") && compact.AccessibleDescription.Contains("Z:"),

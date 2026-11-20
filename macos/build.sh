@@ -63,6 +63,7 @@ done
 cp "$repo/LICENSE" "$contents/Resources/LICENSE-DiscArchive"
 cp "$repo/vendor/7zip/LICENSE-7zip.txt" "$repo/vendor/7zip/COPYING-LGPL-2.1.txt" "$repo/vendor/7zip/unRarLicense.txt" "$archive" "$contents/Resources/"
 cp "$repo/macos/README.md" "$repo/macos/THIRD-PARTY.txt" "$contents/Resources/"
+cp "$repo/使用说明.txt" "$contents/Resources/"
 dotroot="$(dotnet --list-sdks | sed -n '1s/.*\[\(.*\)\/sdk\].*/\1/p')"
 for file in LICENSE.txt ThirdPartyNotices.txt; do
   cp "$dotroot/$file" "$contents/Resources/dotnet-$file"

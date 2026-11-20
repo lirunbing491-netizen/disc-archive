@@ -16,7 +16,7 @@ internal sealed class HostRequest
 {
     public string photo="",target="",targetId="",targetDeviceId="",drive="",project="",existingProject="",mode="metadata",view="auto",resumeId="",driveToken="",mediaHint="";
     public string path="",id="",title="";
-    public bool emptyAtShutter;
+    public bool emptyAtShutter,hidden;
 }
 internal sealed class HostControl
 {
@@ -56,8 +56,8 @@ internal sealed class Host
     internal static async Task<int> Main(string[] args)
     {
         if(args.Length==0||args[0]=="--help"||args[0]=="help")
-        {Console.WriteLine("DiscArchive macOS core 0.4.1\nCommands: devices, recover, list, projects, export, exportTarget, edit, inspect, job\nRequests and job controls use JSON lines on standard input. Events use JSON lines on standard output.");return 0;}
-        if(args[0]=="--version"){Console.WriteLine("0.4.1-beta.1-macos");return 0;}
+        {Console.WriteLine("DiscArchive macOS core 0.4.4-beta.1\nCommands: devices, recover, list, projects, export, exportTarget, edit, addManual, setHidden, inspect, job\nRequests and job controls use JSON lines on standard input. Events use JSON lines on standard output.");return 0;}
+        if(args[0]=="--version"){Console.WriteLine("0.4.4-beta.1");return 0;}
         Console.InputEncoding=new UTF8Encoding(false);Console.OutputEncoding=new UTF8Encoding(false);
         MacReader device=null;
         MacReader Device()=>device??=new MacReader();
@@ -76,9 +76,11 @@ internal sealed class Host
             {
                 case "devices":var inventory=snapshot();Emit(new{ok=true,drives=inventory.drives,targets=inventory.targets});break;
                 case "recover":Workstation.RecoverInterrupted(Book());Emit(new{ok=true});break;
-                case "list":Emit(new{ok=true,entries=Book().List()});break;
+                case "list":var rows=Book().List();Emit(new{ok=true,entries=rows,importedCount=Catalog.LocalImportedCount(rows)});break;
+                case "addManual":var add=await Request();Emit(new{ok=true,entry=Book().AddManual(add.title,add.project)});break;
+                case "setHidden":var visibility=await Request();Book().SetHidden(visibility.id,visibility.hidden);Emit(new{ok=true});break;
                 case "projects":var p=await Request();ValidateTarget(p.target,snapshot());Emit(new{ok=true,projects=ProjectAliases.ListKnownProjects(p.target,CancellationToken.None)});break;
-                case "export":var e=await Request();ValidateOutput(e.path);var book=Book();book.Export(e.path);Emit(new{ok=true,count=book.List().Count});break;
+                case "export":var e=await Request();ValidateOutput(e.path);Emit(new{ok=true,count=Book().ExportLocal(e.path)});break;
                 case "exportTarget":var t=await Request();ValidateTarget(t.target,snapshot());ValidateOutput(t.path);Emit(new{ok=true,count=Book().ExportTarget(t.target,t.path)});break;
                 case "edit":var edit=await Request();var catalog=Book();var row=catalog.List().SingleOrDefault(x=>x.Id==edit.id)??throw new IOException("未找到本机盘号。");catalog.Edit(row,edit.title,edit.project);Emit(new{ok=true});break;
                 case "inspect":var request=await Request();if(!snapshot().drives.Any(x=>x.id==request.drive))throw new IOException("所选光驱已断开。");Emit(new{ok=true,text=inspect(request.drive)});break;
@@ -138,7 +140,7 @@ internal sealed class Host
         {
             var now=Current();if(drive!=Drive||now==null||!now.ready||Expected==null||now.token!=Expected)throw new IOException("光盘在确认后发生变化，请核对实物后重新开始。");
             var opened=inner.Open(drive);
-            try {if(Current()?.token!=Expected)throw new IOException("光盘在打开期间发生变化。");return new MountedDisc(opened.Root,opened.VolumeLabel,()=>{if(Current()?.token!=Expected)throw new IOException("光盘已更换或光驱已断开。");opened.Verify();},opened,opened.Source,opened.Format){UncoveredTracks=opened.UncoveredTracks};}
+            try {if(Current()?.token!=Expected)throw new IOException("光盘在打开期间发生变化。");return new MountedDisc(opened.Root,opened.VolumeLabel,()=>{if(Current()?.token!=Expected)throw new IOException("光盘已更换或光驱已断开。");opened.Verify();},opened,opened.Source,opened.Format){UncoveredTracks=opened.UncoveredTracks,PrepareEject=opened.PrepareEject};}
             catch{opened.Dispose();throw;}
         }
     }
@@ -235,8 +237,8 @@ internal sealed class Host
                         lock(choiceGate){if(projectChoice!=null){if(control.value==proposed||projects.Contains(control.value,StringComparer.Ordinal)){projectChoice.TrySetResult(control.value);projectChoice=null;}else {Status("项目目录不在当前候选中，请重新选择。");Emit(new{@event="project",proposed,options=projects});}}}
                     }
                 }
-                if(copying!=null&&copying.IsCompleted){Entry result=await copying;Emit(new{@event="result",entry=result});return 0;}
-                if(canceled&&copying==null){Emit(new{@event="result",entry=station.Current??registered});return 0;}
+                if(copying!=null&&copying.IsCompleted){Entry result=await copying;Emit(new{@event="result",entry=result,ejectNote=station.LastEjectNote,ejectAccepted=station.LastEjectAccepted});return 0;}
+                if(canceled&&copying==null){Emit(new{@event="result",entry=station.Current??registered,ejectNote="",ejectAccepted=false});return 0;}
                 if(copying==null&&!canceled)
                 {
                     var current=reader.Current();string state=current==null?"disconnected":current.empty?"empty":current.ready?"ready":"waiting";

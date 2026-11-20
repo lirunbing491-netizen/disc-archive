@@ -68,6 +68,28 @@ internal static class MountedSourceTests
         Throws(()=>apply.Invoke(null,new object[]{"{\"names\":[\"second.jpg\"],\"error\":\"actual readdir I/O error\",\"note\":\"\"}",names}),"real directory read error remains failure");
         Check(names.SequenceEqual(new[]{"first.jpg","second.jpg"}),"partial directory names survive a coexisting read error");
     }
+    private static void EjectTickets() {
+        object Ticket(IntPtr handle,Func<IntPtr,string> eject,Action<IntPtr> release,int timeout=2000)=>Activator.CreateInstance(T("MacEjectTicket"),Flags,null,new object[]{handle,eject,release,timeout},null);
+        bool Attempt(object ticket,out string reason) {
+            object[] args={null};bool ok=(bool)T("MacEjectTicket").GetMethod("TryEject").Invoke(ticket,args);reason=(string)args[0];return ok;
+        }
+        int calls=0,releases=0;
+        object unopened=Ticket(IntPtr.Zero,_=>{calls++;return "";},_=>releases++);
+        Check(!Attempt(unopened,out _)&&calls==0&&releases==0,"missing identity ticket never calls native eject");
+        object ticket=Ticket(new IntPtr(1),_=>{calls++;return "{\"ok\":true,\"reason\":\"\"}";},_=>releases++);
+        Check(Attempt(ticket,out _)&&calls==1&&releases==1,"successful one-shot eject releases native ticket");
+        Check(!Attempt(ticket,out _)&&calls==1,"repeated eject does not issue another command");
+        ((IDisposable)ticket).Dispose();Check(releases==1,"disposed completed ticket cannot double-release");
+        object unused=Ticket(new IntPtr(2),_=>{calls++;return "";},_=>releases++);((IDisposable)unused).Dispose();
+        Check(!Attempt(unused,out _)&&calls==1&&releases==2,"disposed unused ticket releases without eject");
+        object rejected=Ticket(new IntPtr(3),_=>"{\"ok\":false,\"reason\":\"busy volume\"}",_=>{});
+        Check(!Attempt(rejected,out string reason)&&reason=="busy volume","normal unmount refusal keeps original reason");
+        using var entered=new System.Threading.ManualResetEventSlim();using var finish=new System.Threading.ManualResetEventSlim();using var released=new System.Threading.ManualResetEventSlim();
+        object slow=Ticket(new IntPtr(4),_=>{entered.Set();finish.Wait();return "{\"ok\":true,\"reason\":\"\"}";},_=>released.Set(),150);
+        Check(!Attempt(slow,out reason)&&entered.IsSet&&reason.Contains("未知"),"bounded native wait reports unknown rather than claiming cancellation");
+        ((IDisposable)slow).Dispose();Check(!released.IsSet,"timeout retains native references while OS operation is active");
+        finish.Set();Check(released.Wait(2000),"native references release only after pending operation returns");
+    }
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="setxattr",SetLastError=true)] private static extern int SetXattr([MarshalAs(UnmanagedType.LPUTF8Str)]string p,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,byte[] data,nuint size,uint pos,int options);
     public static void Main() {
         string temp=Path.Combine(Path.GetTempPath(),"discarchive-mounted-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
@@ -86,6 +108,7 @@ internal static class MountedSourceTests
             object stale=Source(Path.Combine(temp,"stale"),new[]{a},()=>{});string stalePhoto=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="photo.jpg");File.Delete(Path.Combine(a,"photo.jpg"));Throws(()=>Read(stale,stalePhoto),"bad individual file reports failure");string folder=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="folder");Check(Read(stale,Entries(stale,folder).Single()).Length==8,"bad file does not prevent readable sibling");
             PosixNames(temp);
             Coverage();
+            EjectTickets();
             DirectoryReports();
             if(OperatingSystem.IsMacOS()) {
                 string file=Path.Combine(a,"forked");File.WriteAllText(file,"data");byte[] fork=Enumerable.Range(0,600000).Select(i=>(byte)(i*11)).ToArray(),finder=new byte[32];finder[0]=65;

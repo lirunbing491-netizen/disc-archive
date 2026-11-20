@@ -1,6 +1,6 @@
-# 只读设备桥（macOS 13 及以上）
+# 光驱设备桥（macOS 13 及以上）
 
-此目录只负责发现设备和核对介质实例，不弹出、不挂载、不卸载、不写源盘，也不要求管理员权限。发布后的程序使用系统框架，用户无须安装额外运行环境；下面的构建与测试命令需要开发者的 Xcode Command Line Tools。
+此目录负责只读发现设备、核对介质实例，以及归档完成后通过一次性票据正常卸载并弹出原物理光驱；不写源盘，不强制卸载，也不要求管理员权限。发布后的程序使用系统框架，用户无须安装额外运行环境；下面的构建与测试命令需要开发者的 Xcode Command Line Tools。
 
 在项目根目录构建（架构跟随当前编译器；发布通用包时分别构建 arm64/x86_64 再合并）：
 
@@ -26,6 +26,14 @@ xcrun clang -fobjc-arc -fblocks -Wall -Wextra -mmacosx-version-min=13.0 -DDA_DEV
 - token 绑定当前进程会话随机 UUID、光驱 IORegistry entry ID 及全部介质 IORegistry entry ID，不依赖卷标、BSD 名或挂载路径，不用于判断两次插入是否为同一内容。UI 只传 drive ID 给 core；每个 core 必须调用自己的 `da_devices` 取得 token，再调用同进程 `da_verify`，不能拿 UI 或另一 worker 的 token 校验。验证函数会在查询硬件前拒绝来自其他会话、空值、无效 UTF-8 及超长/不合法 ID。应用重启或介质重新发布时需取得新 token；该字段不能当成跨进程/跨启动的恢复任务永久 ID。
 - 无法区分驱动未报告的物理换盘。身份保障基于 macOS 发布/撤销 IOMedia 实例这一实际边界；不声称能识别硬件或系统从未报告的变化。
 
+## 完成后安全弹盘
+
+`da_eject_prepare(drive, token)` 仅捕获并保留物理光驱的 IOKit provider 和 `DRDeviceRef`，不卸载、不弹出。工厂必须仍在读取期间、原介质可核对时调用。零票据不允许退回按卷标、BSD 名或盘符查找。`da_eject_try(ticket)` 在归档回执写完、源读取句柄全部关闭后才调用，前置核对同进程 UUID、原 provider ID 和全部原 IOMedia ID，再对保留的物理设备仅发一次 `DRDeviceEjectMedia`。SDK 明确该调用负责正常卸载后弹出，不能正常卸载就返回错误；这里没有强制卸载、提权、写盘或失败重试。
+
+该系统调用为同步操作，没有取消接口。托管票据后台执行、调用方最多等待20秒；未开始的请求超时后不启动，已进入原生调用的请求超时则明确报告“结果未知，可能稍后完成”，保留所有原生引用到系统返回，绝不因调用方超时重发命令或释放仍在使用的设备引用。明确拒绝保留系统错误号。弹盘结果不改变已完成的拷贝状态。
+
+身份检查与原生系统动作之间无法成为跨框架原子操作；不声称可识别系统未报告的换盘，也不声称同步原生请求超时就已取消。硬件、驱动或系统仍可能在检查之后改变介质；实盘验收前仅以合成设备策略测试证明不匹配拒绝、一次性与引用生命周期。禁止在无单独授权时以实盘测试该功能。
+
 ## 字段
 
 `drives` 仅匹配 `IOCDBlockStorageDevice` 及子类，普通可移动硬盘不因 removable 属性进入光驱列表。该 provider 在空托盘时仍可存在。物理拔掉后，下次快照移除该行；调用方应将此前选中的消失 ID 显示为已断连。
@@ -49,4 +57,4 @@ Windows 开发环境没有 Apple SDK，未在此环境执行 Objective-C 编译�
 - [Apple 光驱 provider 定义](https://github.com/apple-oss-distributions/IOCDStorageFamily/blob/main/IOCDBlockStorageDevice.h)
 - [Apple IOMedia 属性](https://github.com/apple-oss-distributions/IOStorageFamily/blob/main/IOMedia.h)
 - [Apple Disk Arbitration 获取设备及卷信息](https://developer.apple.com/library/archive/documentation/DriversKernelHardware/Conceptual/DiskArbitrationProgGuide/ManipulatingDisks/ManipulatingDisks.html)
-- DiscRecording 状态常量及 C 函数以本机 SDK `DiscRecording/DRCoreDevice.h` 为准；仅调用 CopyDevice/CopyStatus，不调用刻录、擦除、托盘或预留接口。
+- DiscRecording 状态常量及 C 函数以本机 SDK `DiscRecording/DRCoreDevice.h` 为准；发现与核对仅调用 CopyDevice/CopyStatus；弹盘单独使用 `DRDeviceEjectMedia`，不调用刻录、擦除、开关空托盘或预留接口。

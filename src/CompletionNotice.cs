@@ -34,15 +34,19 @@ namespace DiscArchive
             internal string Heading, Message;
             internal bool Attention;
             internal DateTime Expires;
+            internal Action Retry;
         }
 
         // Each drive retains its own result and expiry; a later drive never replaces it.
         public void ShowDrive(Form owner, string drive, string heading, string message, bool attention)
+        { ShowDrive(owner,drive,heading,message,attention,null); }
+
+        public void ShowDrive(Form owner, string drive, string heading, string message, bool attention, Action retry)
         {
             if (disposed || owner == null || owner.IsDisposed || owner.Disposing) return;
             if (owner.InvokeRequired)
             {
-                try { owner.BeginInvoke(new Action(delegate { ShowDrive(owner, drive, heading, message, attention); })); }
+                try { owner.BeginInvoke(new Action(delegate { ShowDrive(owner, drive, heading, message, attention, retry); })); }
                 catch (InvalidOperationException) { }
                 return;
             }
@@ -51,9 +55,17 @@ namespace DiscArchive
             if (key.Length == 1 && Char.IsLetter(key[0])) key += ":";
             if (key.Length == 0) key = "未指定光驱";
             drives[key] = new DriveResult { Heading = String.IsNullOrWhiteSpace(heading) ? "本张处理结束" : heading,
-                Message = message ?? "", Attention = attention, Expires = DateTime.UtcNow.AddMilliseconds(duration) };
+                Message = message ?? "", Attention = attention, Expires = DateTime.UtcNow.AddMilliseconds(duration), Retry = retry };
             PresentDrives();
             driveTimer.Start();
+        }
+
+        internal void ClearDrive(string drive)
+        {
+            string key=(drive ?? "").Trim().TrimEnd('\\','/').ToUpperInvariant();
+            if(key.Length==1 && Char.IsLetter(key[0]))key+=":";
+            if(!drives.Remove(key))return;
+            if(drives.Count==0)ClearDrives(); else PresentDrives();
         }
 
         private void TrackOwner(Form owner)
@@ -90,6 +102,17 @@ namespace DiscArchive
                 driveWindow.Dismissed += delegate { ClearDrives(); };
             }
             Rectangle area = workArea == null ? Screen.FromControl(trackedOwner).WorkingArea : workArea();
+            var actions=new List<KeyValuePair<string,Action>>();
+            foreach(var entry in drives) {
+                string key=entry.Key; DriveResult expected=entry.Value;
+                if(expected.Retry==null)continue;
+                actions.Add(new KeyValuePair<string,Action>(key+" 重试这张盘",delegate {
+                    DriveResult current;
+                    if(!drives.TryGetValue(key,out current) || current!=expected || current.Expires<=DateTime.UtcNow)return;
+                    Action retry=current.Retry; ClearDrive(key); retry();
+                }));
+            }
+            driveWindow.SetActions(actions);
             StringBuilder summary = new StringBuilder();
             StringBuilder details = new StringBuilder();
             bool attention = false;
@@ -107,13 +130,24 @@ namespace DiscArchive
             }
             driveWindow.Present(drives.Count + " 台光驱处理结束", "", attention, area, duration, false);
             int rows = driveWindow.MessageRows;
-            int linesPerDrive = drives.Count * 3 <= rows ? 3 : 2;
+            // DPI and retry actions can leave only five text rows. Use one row per
+            // drive before hiding an entire result, retaining counts in full details.
+            int linesPerDrive = drives.Count * 3 <= rows ? 3 : drives.Count * 2 <= rows ? 2 : 1;
             int visibleCount = Math.Min(drives.Count, Math.Max(1, rows / linesPerDrive));
             bool overflow = visibleCount < drives.Count;
             if (overflow) visibleCount = Math.Max(1, (rows - 1) / linesPerDrive);
             int index = 0;
             StringBuilder remaining = new StringBuilder();
-            foreach (KeyValuePair<string, DriveResult> entry in drives)
+            var ordered=new List<KeyValuePair<string,DriveResult>>(drives);
+            ordered.Sort(delegate(KeyValuePair<string,DriveResult> a,KeyValuePair<string,DriveResult> b) {
+                // When even one row per drive cannot fit, keep a required physical
+                // action visible before routine completions. Drive names remain explicit.
+                bool urgentA=a.Value.Heading.Contains("手动取盘"),urgentB=b.Value.Heading.Contains("手动取盘");
+                if(urgentA!=urgentB)return urgentA ? -1 : 1;
+                if(a.Value.Attention!=b.Value.Attention)return a.Value.Attention ? -1 : 1;
+                return StringComparer.OrdinalIgnoreCase.Compare(a.Key,b.Key);
+            });
+            foreach (KeyValuePair<string, DriveResult> entry in ordered)
             {
                 if (index++ >= visibleCount) { remaining.Append(entry.Key).Append(" "); continue; }
                 if (summary.Length > 0) summary.Append("\r\n");
@@ -122,11 +156,11 @@ namespace DiscArchive
                 if (linesPerDrive == 3) summary.Append("\r\n").Append(driveWindow.FitLine(parts[0]));
                 // MainForm supplies project/disc on the first line and counts on the second.
                 string counts = parts.Length > 1 ? parts[1] : parts[0];
-                summary.Append("\r\n").Append(driveWindow.FitLine(counts));
+                if(linesPerDrive>=2)summary.Append("\r\n").Append(driveWindow.FitLine(counts));
             }
             if (overflow) summary.Append("\r\n").Append(driveWindow.FitLine("另有 " + (drives.Count - visibleCount) + " 台：" + remaining));
             driveWindow.SetDriveSummary(summary.ToString());
-            driveWindow.SetDriveDetails(details.ToString(), overflow);
+            driveWindow.SetDriveDetails(details.ToString(), overflow, linesPerDrive==1);
         }
 
         public void Show(Form owner, string heading, string message, bool attention)
@@ -171,6 +205,7 @@ namespace DiscArchive
             private readonly Label message = new Label();
             private readonly Label footer = new Label();
             private readonly Label close = new Label();
+            private readonly FlowLayoutPanel actions = new FlowLayoutPanel { WrapContents=false, AutoScroll=true };
             private readonly Timer timer = new Timer();
             private readonly ToolTip fullText = new ToolTip();
             private readonly Font titleFont = new Font("Microsoft YaHei UI", 13, FontStyle.Bold);
@@ -198,7 +233,7 @@ namespace DiscArchive
                 close.Click += delegate { timer.Stop(); Hide(); if (Dismissed != null) Dismissed(this, EventArgs.Empty); };
                 footer.Text = "可继续换盘；此通知会自动收起";
                 footer.ForeColor = Color.FromArgb(70, 82, 94);
-                Controls.AddRange(new Control[] { heading, message, footer, close });
+                Controls.AddRange(new Control[] { heading, message, footer, close, actions });
                 timer.Tick += delegate { timer.Stop(); Hide(); };
                 AccessibleRole = AccessibleRole.Alert;
             }
@@ -229,7 +264,9 @@ namespace DiscArchive
                 Size = new Size(width, height);
                 heading.SetBounds(18, 14, width - 62, 58);
                 close.SetBounds(width - 38, 10, 28, 28);
-                message.SetBounds(18, 78, width - 36, height - 126);
+                int actionHeight=actions.Controls.Count>0 ? 38 : 0;
+                message.SetBounds(18, 78, width - 36, height - 126-actionHeight);
+                actions.SetBounds(18,height-40-actionHeight,width-36,actionHeight);
                 footer.SetBounds(18, height - 40, width - 36, 30);
                 Location = new Point(area.Right - width - 12, area.Bottom - height - 12);
                 // Deliberately unowned: Windows hides owned forms when their owner minimizes.
@@ -241,6 +278,18 @@ namespace DiscArchive
 
             internal int MessageRows { get { return Math.Max(1, message.Height / message.Font.Height); } }
 
+            internal void SetActions(List<KeyValuePair<string,Action>> items)
+            {
+                while(actions.Controls.Count>0)actions.Controls[0].Dispose();
+                foreach(var item in items) {
+                    Action action=item.Value;
+                    var button=new Button {Text=item.Key,AutoSize=true,AccessibleName=item.Key};
+                    button.Click+=delegate { action(); };
+                    actions.Controls.Add(button);
+                }
+                actions.Visible=items.Count>0;
+            }
+
             internal string FitLine(string text)
             {
                 text = (text ?? "").Replace("\r", " ").Replace("\n", " ");
@@ -251,9 +300,9 @@ namespace DiscArchive
 
             internal void SetDriveSummary(string text) { message.Text = text; }
 
-            internal void SetDriveDetails(string details, bool overflow)
+            internal void SetDriveDetails(string details, bool overflow, bool compact=false)
             {
-                footer.Text = overflow ? "空间有限，悬停查看全部结果；各项独立收起" : "可继续换盘；各光驱约25秒后独立收起";
+                footer.Text = overflow ? "空间有限，悬停查看全部结果；各项独立收起" : compact ? "精简显示，悬停查看文件数和全部结果" : "可继续换盘；各光驱约25秒后独立收起";
                 fullText.SetToolTip(message, details);
                 AccessibleDescription = details + footer.Text;
             }

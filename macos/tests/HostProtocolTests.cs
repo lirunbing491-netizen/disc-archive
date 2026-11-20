@@ -39,14 +39,21 @@ internal static class HostProtocolTests
     }
     private sealed class Device:IReader
     {
+        private sealed class EjectProbe : IOpticalEjectTicket
+        {
+            private readonly Device owner;
+            internal EjectProbe(Device owner){this.owner=owner;}
+            public bool TryEject(out string reason){owner.Ejects++;reason="";return true;}
+            public void Dispose(){}
+        }
         internal string Source,Token="worker-process:provider:disc-A",TargetPath="",TargetDeviceId="12345";
         internal bool EmptyTray,ReadyFlag=true,ChangeWhenOpened;
-        internal int Opens;
+        internal int Opens,Ejects;
         internal MacInventory Snapshot()=>new MacInventory{drives=new[]{new MacDrive{id="test-optical",ready=ReadyFlag,empty=EmptyTray,token=Token}},targets=TargetPath.Length==0?Array.Empty<MacTarget>():new[]{new MacTarget{path=Path.GetPathRoot(TargetPath),id="system-volume",name="Synthetic parent mount"},new MacTarget{path=TargetPath,id=TargetDeviceId,name="Synthetic external disk"}}};
         public string[] Drives()=>new[]{"test-optical"};
         public bool Empty(string drive)=>EmptyTray;
         public bool Ready(string drive)=>ReadyFlag;
-        public MountedDisc Open(string drive){Interlocked.Increment(ref Opens);if(ChangeWhenOpened)Token="disc-B";return new MountedDisc(Source,"240102-Test",delegate{},null);}
+        public MountedDisc Open(string drive){Interlocked.Increment(ref Opens);if(ChangeWhenOpened)Token="disc-B";return new MountedDisc(Source,"240102-Test",delegate{},null){PrepareEject=()=>new EjectProbe(this)};}
     }
     private static int checks;
     private static void Check(bool value,string text){if(!value)throw new Exception(text);checks++;Console.WriteLine("PASS protocol "+text);}
@@ -95,6 +102,7 @@ internal static class HostProtocolTests
             Check(device.Opens==0,"UI token and shutter-empty claim do not start mounted media");
             input.Send(new{action="confirm"});var result=await output.Event("result");
             Check(result.GetProperty("entry").GetProperty("Status").GetString()==Workstation.Done,"confirmed medium reaches shared successful result");
+            Check(result.GetProperty("ejectAccepted").GetBoolean() && device.Ejects==1 && result.GetProperty("ejectNote").GetString().Length>0,"job forwards bound ticket and returns per-drive eject outcome");
             Check(await running==0&&device.Opens==1,"confirmed job opens one bound source");
             Check(output.Seen.Any(x=>x.TryGetProperty("text",out var text)&&(text.GetString()??"").Contains("拍照时")),"cross-process media hint mismatch is reported without authorizing import");
             Check(book.List().Single(x=>x.Id==unrelated.Id).Status==Workstation.Waiting,"new job never recovers another drive's active registration");

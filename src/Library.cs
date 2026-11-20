@@ -14,17 +14,22 @@ namespace DiscArchive
         private readonly DataGridView grid = new DataGridView();
         private readonly PictureBox recordPhoto = Picture();
         private readonly Label note = LabelOf("",9);
-        private readonly Button saveTitle = ButtonOf("保存标题和项目"), openFiles = ButtonOf("打开归档"), retry = ButtonOf("核对 / 续导原盘");
+        private readonly Label localImported = LabelOf("本机已导 0 张",10);
+        private readonly Button saveTitle = ButtonOf("保存标签"), openFiles = ButtonOf("打开归档"), retry = ButtonOf("核对 / 续导原盘");
+        private readonly Button removeRecord = ButtonOf("从本机移除…"), restoreRecord = ButtonOf("恢复到登记册"), recordEvidence=ButtonOf("归类依据"), recordReceipts=ButtonOf("本盘记录");
+        private readonly CheckBox showHidden = new CheckBox { Text="查看已移除", AutoSize=true, Anchor=AnchorStyles.Left };
+        private string lastSearch="";
         private string editorId;
         private bool editing, filling;
 
         private void BuildLibrary(TabPage tab)
         {
-            TableLayoutPanel l = Table(-100); Row(l,44); Row(l,-100); Row(l,165); Row(l,46); tab.Controls.Add(l);
-            TableLayoutPanel tools = Table(70,-100,115,160); Row(tools,-100);
+            TableLayoutPanel l = Table(-100); Row(l,44); Row(l,-100); Row(l,125); Row(l,84); tab.Controls.Add(l);
+            TableLayoutPanel tools = Table(170,60,-100,115,160); Row(tools,-100);
             search.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            search.AccessibleName="查找登记";
             Button export = ButtonOf("导出本机表…"), sharedExport=ButtonOf("导出归档盘总表…");
-            tools.Controls.Add(LabelOf("查找",10),0,0); tools.Controls.Add(search,1,0); tools.Controls.Add(export,2,0);tools.Controls.Add(sharedExport,3,0);
+            tools.Controls.Add(localImported,0,0); tools.Controls.Add(LabelOf("查找",10),1,0); tools.Controls.Add(search,2,0); tools.Controls.Add(export,3,0);tools.Controls.Add(sharedExport,4,0);
             sharedExport.Click+=async delegate {
                 string root=ArchiveFolder("选择各电脑共同使用的归档根目录",target.Text); if(root==null)return;
                 using(var dlg=new SaveFileDialog{Title="导出此位置所有工位的登记",Filter="CSV 总表|*.csv",FileName="归档盘总表.csv"}) {
@@ -38,24 +43,26 @@ namespace DiscArchive
                 }
             };
             l.Controls.Add(tools,0,0);
+            Button add=ButtonOf("补录本机登记…");
+            add.Click+=delegate { UserAction(AddManualRecord); };
+            showHidden.CheckedChanged+=delegate { if(muteSelection)return; if(!ResolveLibraryEdits()) { muteSelection=true; showHidden.Checked=!showHidden.Checked; muteSelection=false; return; } FillGrid(); };
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
             grid.RowHeadersVisible = false; grid.MultiSelect = false; grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
             grid.BackgroundColor = Color.White; grid.BorderStyle = BorderStyle.FixedSingle;
             grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            foreach (string h in new string[]{"盘号","标题","标题来源","项目","导盘状态","目标硬盘","光驱"})
+            foreach (string h in new string[]{"项目 / 标题","人工标题","导盘状态","目标硬盘"})
             { int i = grid.Columns.Add("c"+grid.Columns.Count,h); grid.Columns[i].SortMode = DataGridViewColumnSortMode.NotSortable; }
-            grid.Columns[0].FillWeight=125; grid.Columns[1].FillWeight=175; grid.Columns[2].FillWeight=66;
-            grid.Columns[3].FillWeight=90; grid.Columns[4].FillWeight=82; grid.Columns[5].FillWeight=100;
+            grid.Columns[0].FillWeight=160; grid.Columns[1].FillWeight=110; grid.Columns[2].FillWeight=80; grid.Columns[3].FillWeight=100;
             grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(33,104,96);
             l.Controls.Add(grid,0,1);
-            TableLayoutPanel fields = Table(135,67,-100); Row(fields,42); Row(fields,42); Row(fields,-100);
+            TableLayoutPanel fields = Table(120,80,-100); Row(fields,36); Row(fields,36); Row(fields,-100);
             fields.Controls.Add(recordPhoto,0,0); fields.SetRowSpan(recordPhoto,3);
-            fields.Controls.Add(LabelOf("标题",10),1,0); fields.Controls.Add(LabelOf("项目",10),1,1);
+            fields.Controls.Add(LabelOf("标题标签",10),1,0); fields.Controls.Add(LabelOf("项目标签",10),1,1);
             editTitle.MaxLength=500; editProject.MaxLength=240;
             editTitle.Anchor=editProject.Anchor=AnchorStyles.Left|AnchorStyles.Right;
             fields.Controls.Add(editTitle,2,0); fields.Controls.Add(editProject,2,1); fields.Controls.Add(note,1,2); fields.SetColumnSpan(note,2);
-            Button receipts=ButtonOf("本盘记录");
-            Button why=ButtonOf("归类依据");
+            Button receipts=recordReceipts;
+            Button why=recordEvidence;
             why.Click+=delegate {
                 Entry e=Selected(); if(e==null) return;
                 string evidence="卷标　"+(String.IsNullOrWhiteSpace(e.DiscLabel)?"未记录或为空":e.DiscLabel)+
@@ -72,14 +79,29 @@ namespace DiscArchive
                 string dir=Directory.Exists(e.Report) ? e.Report : e.JobDir;
                 OpenDirectory(dir);
             }); };
-            l.Controls.Add(fields,0,2); l.Controls.Add(Flow(saveTitle,openFiles,why,receipts,retry),0,3);
-            grid.SelectionChanged += delegate { if (!muteSelection) ShowRecord(); };
-            search.TextChanged += delegate { FillGrid(); };
+            l.Controls.Add(fields,0,2);
+            TableLayoutPanel actions=Table(-100); Row(actions,42); Row(actions,42);
+            actions.Controls.Add(Flow(saveTitle,add,removeRecord,restoreRecord,showHidden),0,0);
+            actions.Controls.Add(Flow(openFiles,why,receipts,retry),0,1); l.Controls.Add(actions,0,3);
+            removeRecord.Click+=delegate { UserAction(delegate { SetRecordHidden(true); }); };
+            restoreRecord.Click+=delegate { UserAction(delegate { SetRecordHidden(false); }); };
+            grid.SelectionChanged += delegate {
+                if(muteSelection)return;
+                Entry next=Selected(); string nextId=next==null ? null : next.Id;
+                if(editing && nextId!=editorId && !ResolveLibraryEdits()) { SelectLibraryRecord(editorId); return; }
+                if(nextId!=null)SelectLibraryRecord(nextId); else ShowRecord();
+            };
+            search.TextChanged += delegate {
+                if(muteSelection)return;
+                if(!ResolveLibraryEdits()) { muteSelection=true; search.Text=lastSearch; muteSelection=false; return; }
+                lastSearch=search.Text; FillGrid();
+            };
             editTitle.TextChanged += delegate { if (!filling) editing=true; };
             editProject.TextChanged += delegate { if (!filling) editing=true; };
             saveTitle.Click += delegate { UserAction(SaveEdit); };
             openFiles.Click += delegate { UserAction(delegate {
                 Entry e = Selected(); if(e==null) return;
+                if(e.ManualOnly) return;
                 if(!station.Book.IsOriginalTarget(e)||!Directory.Exists(e.JobDir)) throw new IOException("请连接原归档硬盘并使用登记时的盘符："+e.TargetRoot);
                 if(LiveEntry(e.Id)==null) book.SyncLabels(e);
                 if(e.ArchiveFolders==null || e.ArchiveFolders.Length==0) OpenDirectory(e.JobDir);
@@ -96,7 +118,7 @@ namespace DiscArchive
             export.Click += delegate { using (SaveFileDialog dlg=new SaveFileDialog {Title="导出所有光盘登记",Filter="CSV 总表|*.csv",FileName="光盘登记册.csv"})
                 if(dlg.ShowDialog(this)==DialogResult.OK) UserAction(delegate { station.Book.Export(dlg.FileName); Notice("总表已导出。"); }); };
             retry.Click += delegate { UserAction(delegate {
-                Entry e=Selected(); if (e==null || Active || LiveEntry(e.Id)!=null) return;
+                Entry e=Selected(); if (e==null || e.ManualOnly || e.HiddenFromCatalog || Active || LiveEntry(e.Id)!=null) return;
                 DriveSlot slot=selectedSlot;
                 if (!Confirm("请准备照片中同一张原盘。使用 "+slot.Drive+" 核对已归档文件并只补缺失或损坏项？旧版无摘要记录需额外读取原盘。")) return;
                 if(slot.Worker.Current!=null || LiveEntry(e.Id)!=null) throw new IOException("这张盘或指定光驱已有任务。");
@@ -131,6 +153,9 @@ namespace DiscArchive
         private void Reload() { entries = station.Book.List(); FillGrid(); }
         private void FillGrid()
         {
+            localImported.Text="本机已导 "+Catalog.LocalImportedCount(entries)+" 张";
+            // Background task completions may refresh the catalog while labels are being typed.
+            if(editing) return;
             string keep=editorId;
             muteSelection=true;
             try
@@ -139,18 +164,22 @@ namespace DiscArchive
                 string term=search.Text.Trim();
                 List<DataGridViewRow> rows = new List<DataGridViewRow>();
                 int keepIndex=-1;
-                if(entries!=null) for(int i=entries.Count-1;i>=0;i--)
+                if(entries!=null) foreach(Entry e in entries.OrderByDescending(x=>x.Created??"",StringComparer.Ordinal)
+                    .ThenByDescending(x=>CatalogSequence(x.Id)).ThenByDescending(x=>x.Id??"",StringComparer.Ordinal))
                 {
-                    Entry e=entries[i];
-                    string[] cells = {e.Id, e.Title==e.Id ? "" : e.Title, e.TitleState ?? "待确认", e.Project, e.Status, e.TargetName,e.Drive};
-                    if(term.Length>0 && !cells.Any(s => s!=null && s.IndexOf(term,StringComparison.OrdinalIgnoreCase)>=0)) continue;
+                    if(e.HiddenFromCatalog!=showHidden.Checked)continue;
+                    string title=e.Title==e.Id ? "" : e.Title;
+                    string primary=String.IsNullOrWhiteSpace(e.Project) ? title : e.Project;
+                    string alternate=String.Equals(title,primary,StringComparison.OrdinalIgnoreCase) ? "" : title;
+                    string[] cells = {primary, alternate, e.ManualOnly ? "手工补录" : e.Status, e.ManualOnly ? "仅本机登记" : e.TargetName};
+                    if(term.Length>0 && !cells.Concat(new[]{e.Id,e.TitleState}).Any(s => s!=null && s.IndexOf(term,StringComparison.OrdinalIgnoreCase)>=0)) continue;
                     DataGridViewRow row = new DataGridViewRow();
                     row.CreateCells(grid, cells); row.Tag=e;
                     if(e.Id==keep) keepIndex=rows.Count;
                     rows.Add(row);
                 }
                 if(rows.Count>0) grid.Rows.AddRange(rows.ToArray());
-                if(keepIndex>=0) grid.CurrentCell=grid.Rows[keepIndex].Cells[0];
+                if(rows.Count>0) grid.CurrentCell=grid.Rows[keepIndex>=0 ? keepIndex : 0].Cells[0];
             }
             finally { muteSelection=false; }
             ShowRecord();
@@ -159,8 +188,14 @@ namespace DiscArchive
         {
             Entry e=Selected();
             bool same=e!=null && e.Id==editorId;
-            bool canEdit=e!=null; editTitle.Enabled=editProject.Enabled=saveTitle.Enabled=openFiles.Enabled=canEdit;
-            retry.Enabled=canEdit && selectedSlot.Connected && !Active && LiveEntry(e.Id)==null;
+            bool canEdit=e!=null && !e.HiddenFromCatalog;
+            editTitle.Enabled=editProject.Enabled=saveTitle.Enabled=canEdit;
+            bool archived=e!=null && !e.ManualOnly && !e.HiddenFromCatalog;
+            openFiles.Enabled=recordEvidence.Enabled=recordReceipts.Enabled=archived;
+            retry.Enabled=archived && selectedSlot.Connected && !Active && LiveEntry(e.Id)==null;
+            removeRecord.Visible=!showHidden.Checked; restoreRecord.Visible=showHidden.Checked;
+            removeRecord.Enabled=canEdit && LiveEntry(e.Id)==null;
+            restoreRecord.Enabled=e!=null && e.HiddenFromCatalog;
             if(!same || !editing)
             {
                 filling=true;
@@ -174,7 +209,15 @@ namespace DiscArchive
                 catch { SetPhoto(recordPhoto,null); }
             }
             editorId=e==null ? null : e.Id;
-            note.Text=e==null ? "登记后可在这里查看盘面、修订标题和查找硬盘。" : e.TargetRoot+"   ·   "+e.Created+"\n"+(String.IsNullOrEmpty(e.Note) ? e.NamingReason : e.Note);
+            note.Text=e==null ? "可直接补录本机登记；编辑标签不会重命名磁盘目录。" :
+                "盘号："+e.Id+"   ·   "+(e.ManualOnly ? "仅本机补录，无归档文件" : e.TargetRoot)+"\n"+
+                (e.HiddenFromCatalog ? "已从本机列表移除；可恢复。照片、素材和硬盘回执均保留。" : "修改标题、项目仅更新标签，不重命名磁盘目录。")+
+                (String.IsNullOrWhiteSpace(e.Created) ? "" : "  ·  "+e.Created);
+        }
+        private static long CatalogSequence(string id)
+        {
+            string[] parts=(id??"").Split('-'); long sequence;
+            return parts.Length>1 && Int64.TryParse(parts[1],out sequence) ? sequence : 0;
         }
         private static void OpenDirectory(string dir)
         {
@@ -183,13 +226,59 @@ namespace DiscArchive
         }
         private void SaveEdit()
         {
-            Entry selected=Selected(); if(selected==null) return;
-            Entry e = LiveEntry(selected.Id) ?? book.List().Find(x=>x.Id==selected.Id);
+            if(editorId==null) return;
+            Entry e = LiveEntry(editorId) ?? book.List().Find(x=>x.Id==editorId);
+            if(e==null || e.HiddenFromCatalog)return;
             string title=editTitle.Text.Trim();
-            bool online=station.Book.IsOriginalTarget(e);
+            bool online=!e.ManualOnly && station.Book.IsOriginalTarget(e);
             station.Book.Edit(e,title,editProject.Text.Trim());
             editing=false; Reload();
-            note.Text=online ? "修改已保存到登记册和归档硬盘。" : "修改已保存在本机。接回原硬盘后点“打开归档”可同步。";
+            note.Text="盘号："+e.Id+"\n"+(e.ManualOnly ? "标签已保存在本机。此项为手工补录，无归档文件，不重命名磁盘目录。" : online ? "标签已保存到登记册和归档硬盘，磁盘目录名称未改变。" : "标签已保存在本机，磁盘目录名称未改变。接回原硬盘后点“打开归档”可同步。");
+        }
+        private bool ResolveLibraryEdits()
+        {
+            if(!editing)return true;
+            DialogResult answer=MessageBox.Show(this,"当前标签尚未保存。是否先保存？\r\n选“否”放弃本次修改，选“取消”继续编辑。","保存标签",MessageBoxButtons.YesNoCancel,MessageBoxIcon.Question);
+            if(answer==DialogResult.Cancel)return false;
+            if(answer==DialogResult.Yes) {
+                try { SaveEdit(); } catch(Exception ex) { Notice(ex.Message); return false; }
+            } else editing=false;
+            return true;
+        }
+        private void SelectLibraryRecord(string id)
+        {
+            muteSelection=true;
+            try { foreach(DataGridViewRow row in grid.Rows) { Entry e=row.Tag as Entry; if(e!=null && e.Id==id) { grid.CurrentCell=row.Cells[0]; break; } } }
+            finally { muteSelection=false; }
+            ShowRecord();
+        }
+        private void SetRecordHidden(bool hidden)
+        {
+            Entry e=Selected(); if(e==null)return;
+            string id=e.Id;
+            if(LiveEntry(id)!=null)throw new IOException("这张盘仍在处理中，请先完成或停止任务。");
+            if(!ResolveLibraryEdits())return;
+            if(hidden && !Confirm("从本机登记册移除这条记录？\r\n只隐藏本机条目，照片、归档素材及硬盘回执均保留。\r\n以后勾选“查看已移除”，可恢复。"))return;
+            if(LiveEntry(id)!=null)throw new IOException("这张盘仍在处理中，请先完成或停止任务。");
+            book.SetHidden(id,hidden); editing=false; editorId=null; Reload();
+        }
+        private void AddManualRecord()
+        {
+            if(!ResolveLibraryEdits())return;
+            using(var dialog=new Form { Text="补录本机登记", Font=Font, ClientSize=new Size(540,220), FormBorderStyle=FormBorderStyle.FixedDialog, StartPosition=FormStartPosition.CenterParent, MinimizeBox=false, MaximizeBox=false }) {
+                var layout=Table(80,-100); layout.Padding=new Padding(12); Row(layout,44); Row(layout,40); Row(layout,40); Row(layout,54);
+                var title=new TextBox { Dock=DockStyle.Fill, MaxLength=500 }; var projectName=new TextBox { Dock=DockStyle.Fill, MaxLength=240 };
+                var hint=LabelOf("仅登记本机标签，不需要照片、光驱或归档硬盘。",10); layout.Controls.Add(hint,0,0); layout.SetColumnSpan(hint,2);
+                layout.Controls.Add(LabelOf("标题",10),0,1); layout.Controls.Add(title,1,1);
+                layout.Controls.Add(LabelOf("项目",10),0,2); layout.Controls.Add(projectName,1,2);
+                var ok=ButtonOf("保存补录"); var cancel=ButtonOf("取消"); cancel.DialogResult=DialogResult.Cancel;
+                ok.Click+=delegate { if(String.IsNullOrWhiteSpace(title.Text) && String.IsNullOrWhiteSpace(projectName.Text)) { MessageBox.Show(dialog,"请填写标题或项目。"); return; } dialog.DialogResult=DialogResult.OK; };
+                layout.Controls.Add(Flow(ok,cancel),1,3); dialog.Controls.Add(layout); dialog.AcceptButton=ok; dialog.CancelButton=cancel;
+                if(dialog.ShowDialog(this)!=DialogResult.OK)return;
+                Entry e=book.AddManual(title.Text.Trim(),projectName.Text.Trim());
+                muteSelection=true; showHidden.Checked=false; search.Text=""; lastSearch=""; muteSelection=false;
+                editorId=e.Id; Reload();
+            }
         }
     }
 }

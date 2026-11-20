@@ -17,16 +17,23 @@ namespace DiscArchive
         private readonly ComboBox devices = new ComboBox();
         private readonly Button refresh = new Button(), open = new Button(), shutter = new Button();
         private readonly Label status = new Label();
-        private readonly PictureBox preview = new PictureBox();
+        private readonly PictureBox preview = new CameraPreview();
         private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
         private CameraSession session;
         private bool captureEnabled = true;
         private bool taking;
+        private bool focusPreviewOnFirstFrame;
+        private readonly Func<Bitmap> syntheticFrames;
+        private const string KeyboardHint = " 预览画面或快门有焦点时，回车 / 空格拍照，按住不连拍。其它按钮、下拉框保留原操作。";
 
-        public CameraPanel(Action<string> onCapture)
+        public CameraPanel(Action<string> onCapture) : this(onCapture, null) { }
+
+        // Synthetic source is for isolated UI tests; it never enumerates or opens devices.
+        internal CameraPanel(Action<string> onCapture, Func<Bitmap> syntheticFrames)
         {
             if (onCapture == null) throw new ArgumentNullException("onCapture");
             this.onCapture = onCapture;
+            this.syntheticFrames = syntheticFrames;
             Dock = DockStyle.Fill;
             devices.DropDownStyle = ComboBoxStyle.DropDownList; devices.Width = 260;
             refresh.Text = "刷新设备"; refresh.AutoSize = true;
@@ -36,6 +43,7 @@ namespace DiscArchive
             bar.Controls.AddRange(new Control[] { devices, refresh, open, shutter });
             status.Dock = DockStyle.Bottom; status.Height = 56; status.Padding = new Padding(8);
             status.Text = "选择内置或 USB 摄像头后打开预览。只有按快门时才保存照片。";
+            preview.TabStop = true; preview.Click += delegate { preview.Focus(); };
             preview.Dock = DockStyle.Fill; preview.BackColor = Color.FromArgb(30, 30, 30); preview.SizeMode = PictureBoxSizeMode.Zoom;
             Controls.Add(preview); Controls.Add(status); Controls.Add(bar);
             refresh.Click += delegate { RefreshDevices(); };
@@ -44,7 +52,31 @@ namespace DiscArchive
             shutter.Click += delegate { TakePhoto(); };
             timer.Interval = 120;
             timer.Tick += delegate { UpdatePreview(); };
-            RefreshDevices();
+            if (syntheticFrames == null) RefreshDevices();
+            else UpdatePreview();
+        }
+
+        internal void FocusPreviewForShutter() { if (KeyboardCaptureReady) preview.Focus(); }
+
+        internal bool KeyboardCaptureReady
+        {
+            get { return captureEnabled && !taking && preview.Image != null && (session != null || syntheticFrames != null); }
+        }
+
+        internal bool AllowsShutterKeyFocus(Control focus)
+        {
+            return focus == this || focus == preview || focus == shutter;
+        }
+
+        internal void CaptureFromKeyboard()
+        {
+            // Mouse and keyboard share the same shutter and registration checks.
+            if (KeyboardCaptureReady) TakePhoto();
+        }
+
+        private Bitmap ReadFrame()
+        {
+            return syntheticFrames != null ? syntheticFrames() : (session == null ? null : session.GetFrame());
         }
 
         public Action BeforeShutter { get; set; }
@@ -52,12 +84,13 @@ namespace DiscArchive
         public void SetCaptureEnabled(bool enabled)
         {
             captureEnabled = enabled;
-            shutter.Enabled = enabled && session != null && preview.Image != null && !taking;
+            shutter.Enabled = KeyboardCaptureReady;
         }
 
         public void StopPreview()
         {
             timer.Stop();
+            focusPreviewOnFirstFrame = false;
             if (session != null) { session.Dispose(); session = null; }
             ReplacePreview(null);
             shutter.Enabled = false; open.Text = "打开预览";
@@ -85,6 +118,7 @@ namespace DiscArchive
             try
             {
                 session = new CameraSession(device);
+                focusPreviewOnFirstFrame = open.Focused;
                 open.Text = "关闭预览";
                 status.Text = "摄像头正在预览，等待首帧。请将盘面放清晰后按快门；不会自动拍照。";
                 timer.Start();
@@ -100,11 +134,16 @@ namespace DiscArchive
         {
             try
             {
-                Bitmap frame = session == null ? null : session.GetFrame();
+                Bitmap frame = ReadFrame();
                 if (frame == null) return;
                 ReplacePreview(frame);
+                if (focusPreviewOnFirstFrame)
+                {
+                    focusPreviewOnFirstFrame = false;
+                    if (open.Focused) preview.Focus();
+                }
                 shutter.Enabled = captureEnabled && !taking;
-                status.Text = "正在预览（" + frame.Width + " × " + frame.Height + "）。请确认盘面文字清晰，再拍下这张盘面。";
+                status.Text = "正在预览（" + frame.Width + " × " + frame.Height + "）。请确认盘面文字清晰。" + KeyboardHint;
             }
             catch (Exception ex)
             {
@@ -115,14 +154,14 @@ namespace DiscArchive
 
         private void TakePhoto()
         {
-            if (!captureEnabled || taking || session == null) return;
+            if (!KeyboardCaptureReady) return;
             taking = true; shutter.Enabled = false;
             string path = null;
             try
             {
                 Action beforeShutter = BeforeShutter;
                 if (beforeShutter != null) beforeShutter();
-                using (Bitmap frame = session.GetFrame())
+                using (Bitmap frame = ReadFrame())
                 {
                     if (frame == null) throw new IOException("摄像头还没有返回画面，请稍后再拍。");
                     path = SaveFrame(frame, Path.Combine(Path.GetTempPath(), "DiscArchive", "摄像头照片"));
@@ -130,7 +169,7 @@ namespace DiscArchive
                 // The callback is synchronous on the WinForms UI thread. Keep the file alive
                 // until the caller has copied it; retain it on failure for manual recovery.
                 DeliverSavedPhoto(path, onCapture);
-                status.Text = "盘面照片已交给当前登记流程。换下一张盘后，可再次按快门。";
+                status.Text = "盘面照片已交给当前登记流程。换下一张盘后，可再次按快门。" + KeyboardHint;
             }
             catch (Exception ex)
             {
@@ -170,6 +209,11 @@ namespace DiscArchive
             if (disposing) { StopPreview(); timer.Dispose(); }
             base.Dispose(disposing);
         }
+    }
+
+    internal sealed class CameraPreview : PictureBox
+    {
+        internal CameraPreview() { SetStyle(ControlStyles.Selectable, true); TabStop = true; }
     }
 
     internal sealed class CameraDevice

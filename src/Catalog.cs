@@ -27,6 +27,12 @@ namespace DiscArchive
         public string SourceFormat, SourceCoverage, CloseWarning;
         public long ReusedFiles, ReusedBytes;
         public bool PendingLabelSync;
+        [System.ComponentModel.DefaultValue(false)]
+        public bool ManualOnly;
+        [System.ComponentModel.DefaultValue(false)]
+        public bool HiddenFromCatalog;
+        [System.ComponentModel.DefaultValue(false)]
+        public bool ImportedLocally;
         public long Failed, Warnings;
         public long Files, Bytes;
         internal Entry ForAttempt() { return (Entry)MemberwiseClone(); }
@@ -36,6 +42,7 @@ namespace DiscArchive
     {
         private readonly string stateDir;
         private readonly string database;
+        private readonly string localDatabase;
         private readonly string sequenceDir;
         private const string Marker = ".discarchive-target.id";
         private static readonly XmlSerializer Serializer = new XmlSerializer(typeof(List<Entry>));
@@ -49,12 +56,69 @@ namespace DiscArchive
             this.stateDir = Path.GetFullPath(stateDir);
             Directory.CreateDirectory(this.stateDir);
             database = Path.Combine(this.stateDir, "catalog.xml");
+            localDatabase = Path.Combine(this.stateDir, "catalog-local.xml");
             this.sequenceDir = sequenceDir;
         }
 
         public List<Entry> List()
         {
             using (Acquire(Path.Combine(stateDir, "catalog.lock"))) return Read();
+        }
+
+        // Files includes reused files. A reconciliation of another workstation's
+        // files is not a local import; a genuine completed empty disc is.
+        private static bool HasLocalImport(Entry e)
+        {
+            return !e.ManualOnly && (String.IsNullOrWhiteSpace(e.LatestRunId) || e.LatestRunId==e.Id) &&
+                (e.Files>e.ReusedFiles || (e.Status=="已拷出" && e.Files==0 && e.Failed==0));
+        }
+
+        internal static int LocalImportedCount(IEnumerable<Entry> entries)
+        {
+            HashSet<string> discs=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if(entries!=null) foreach(Entry e in entries) {
+                if(e==null || e.ManualOnly || !(e.ImportedLocally || HasLocalImport(e))) continue;
+                string id=String.IsNullOrWhiteSpace(e.CanonicalId) ? e.Id : e.CanonicalId;
+                if(!String.IsNullOrWhiteSpace(id)) discs.Add(id);
+            }
+            return discs.Count;
+        }
+
+        public Entry AddManual(string title, string project)
+        {
+            title = (title ?? "").Trim(); project = (project ?? "").Trim();
+            RequireManualLabels(title, project);
+            using (Acquire(Path.Combine(stateDir, "catalog.lock")))
+            {
+                List<Entry> entries = Read();
+                string id;
+                do { id = AllocateId(); }
+                while (entries.Exists(x => x.Id == id) || Directory.Exists(Path.Combine(stateDir,"entries",id)) || File.Exists(Path.Combine(stateDir,"entries",id)));
+                Entry entry = new Entry { Id=id, RegistrationId=Guid.NewGuid().ToString("N"),
+                    Title=title, Project=project, TitleState=title.Length==0 ? "待确认" : "已确认",
+                    Status="手工补录", ManualOnly=true, Note="",
+                    Created=DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) };
+                entries.Add(entry); WriteLocal(entries); return entry;
+            }
+        }
+
+        private static void RequireManualLabels(string title, string project)
+        {
+            if (String.IsNullOrWhiteSpace(title) && String.IsNullOrWhiteSpace(project))
+                throw new ArgumentException("标题和项目至少填写一项。");
+        }
+
+        public void SetHidden(string id, bool hidden)
+        {
+            using (Acquire(Path.Combine(stateDir,"catalog.lock")))
+            {
+                List<Entry> rows=Read(); Entry local=rows.Find(x=>x.Id==id);
+                if(local==null) throw new InvalidOperationException("未找到本机登记。");
+                if(hidden && !local.ManualOnly && (local.Status=="等待放盘" || local.Status=="正在归类" ||
+                    local.Status=="抢救中" || local.Status=="等待选择" || local.Status=="复制校验中"))
+                    throw new InvalidOperationException("该盘仍有进行中的任务，请先结束任务再从本机列表移除。");
+                local.HiddenFromCatalog=hidden; WriteLocal(rows);
+            }
         }
 
         public Entry Create(string photoPath, string targetRoot, string drive, string project, string expectedTargetId = null)
@@ -155,12 +219,25 @@ namespace DiscArchive
                 int index = entries.FindIndex(delegate(Entry item) { return item.Id == e.Id; });
                 if (index < 0) throw new InvalidOperationException("该盘尚未登记。");
                 Entry old = entries[index];
+                if (old.ManualOnly != e.ManualOnly) throw new InvalidOperationException("不能修改登记的来源类型。");
                 if (old.TargetId != e.TargetId || old.TargetRoot != e.TargetRoot || old.JobDir != e.JobDir || old.Photo != e.Photo || old.OriginalPhoto != e.OriginalPhoto || old.Created != e.Created || old.RegistrationId != e.RegistrationId)
                     throw new InvalidOperationException("不能修改盘号对应的目标位置、照片或创建时间。");
+                // A worker may save a snapshot taken before a local hide/restore.
+                // Only SetHidden owns that flag, under the same catalog lock.
+                e.HiddenFromCatalog = old.HiddenFromCatalog;
+                // Keep successful local history when retries clear the current counts.
+                // Never inherit this workstation-only flag from an archive replica.
+                e.ImportedLocally = !e.ManualOnly && (old.ImportedLocally || HasLocalImport(old) || HasLocalImport(e));
+                if(old.ManualOnly) {
+                    RequireManualLabels(e.Title,e.Project);
+                    e.Status="手工补录"; e.Files=e.Bytes=e.Failed=e.Warnings=e.ReusedFiles=e.ReusedBytes=0;
+                    e.PendingLabelSync=false;
+                }
                 entries[index] = e;
+                if(e.ManualOnly) { WriteLocal(entries); return; }
                 Write(entries);
                 // Missing media or a reused drive letter must never prevent a local edit.
-                if (IsOriginalTarget(e)) WriteReplica(e);
+                if (!e.ManualOnly && IsOriginalTarget(e)) WriteReplica(e);
             }
         }
 
@@ -179,6 +256,15 @@ namespace DiscArchive
             {
                 var rows=Read(); var local=rows.Find(x=>x.Id==e.Id && x.RegistrationId==e.RegistrationId && x.TargetId==e.TargetId);
                 if(local==null) throw new IOException("未找到本机的原盘登记。");
+                if(local.ManualOnly) {
+                    if(edited) {
+                        RequireManualLabels(e.Title,e.Project);
+                        local.Title=e.Title; local.Project=e.Project; local.TitleState=e.TitleState;
+                        local.PendingLabelSync=false; WriteLocal(rows);
+                    }
+                    e.ManualOnly=true; e.HiddenFromCatalog=local.HiddenFromCatalog; e.PendingLabelSync=false;
+                    return;
+                }
                 if(edited) {
                     local.Title=e.Title; local.Project=e.Project; local.TitleState=e.TitleState;
                     e.PendingLabelSync=local.PendingLabelSync=true; Write(rows);
@@ -208,16 +294,23 @@ namespace DiscArchive
         }
 
         public void Export(string csvPath)
+        { ExportLocal(csvPath); }
+
+        internal int ExportLocal(string csvPath)
         {
             List<Entry> entries = List();
             StringBuilder csv = new StringBuilder(CsvHeader);
+            int count=0;
             foreach (Entry e in entries)
             {
+                if(e.HiddenFromCatalog) continue;
+                count++;
                 string[] values = { e.Id, e.Title, e.TitleState, e.Project, e.Status, e.Note, e.Photo, e.OriginalPhoto, e.JobDir, e.TargetName, e.TargetRoot, e.TargetId, e.Drive, e.Created, e.Files.ToString(CultureInfo.InvariantCulture), e.Bytes.ToString(CultureInfo.InvariantCulture),e.Failed.ToString(),String.Join(" / ",e.ArchiveFolders??new string[0]),e.DiscLabel,e.PhotoText,e.NamingReason,e.Report,e.Warnings.ToString(CultureInfo.InvariantCulture), e.CanonicalId??e.Id,e.ReusedFiles.ToString(),e.LatestRunId??e.Id };
                 for (int i = 0; i < values.Length; i++) { if (i > 0) csv.Append(','); csv.Append(Csv(values[i])); }
                 csv.Append("\r\n");
             }
             AtomicText(Path.GetFullPath(csvPath), csv.ToString());
+            return count;
         }
 
         // Each published per-disc replica is authoritative for target-wide discovery.
@@ -379,6 +472,32 @@ namespace DiscArchive
 
         private List<Entry> Read()
         {
+            List<Entry> entries=ReadMain();
+            Dictionary<string,Entry> byId=new Dictionary<string,Entry>(StringComparer.Ordinal);
+            foreach(Entry entry in entries) if(!byId.ContainsKey(entry.Id)) byId.Add(entry.Id,entry);
+            List<Entry> local;
+            try {
+                local=File.Exists(localDatabase) ? ReadFile(localDatabase) :
+                    (File.Exists(localDatabase+".bak") ? ReadFile(localDatabase+".bak") : new List<Entry>());
+            }
+            catch(InvalidOperationException) { throw new IOException("本机列表维护文件损坏，请保留 catalog-local.xml 及其备份。"); }
+            foreach(Entry extra in local) {
+                if(extra.ManualOnly) {
+                    if(byId.ContainsKey(extra.Id)) throw new IOException("手工补录编号与实盘登记冲突，请保留本机登记文件并检查。");
+                    entries.Add(extra); byId.Add(extra.Id,extra);
+                }
+                else {
+                    Entry match;
+                    if(byId.TryGetValue(extra.Id,out match) && match.RegistrationId==extra.RegistrationId &&
+                        match.Created==extra.Created && match.TargetId==extra.TargetId)
+                        match.HiddenFromCatalog=extra.HiddenFromCatalog;
+                }
+            }
+            return entries;
+        }
+
+        private List<Entry> ReadMain()
+        {
             if (!File.Exists(database))
             {
                 if (File.Exists(database + ".bak")) return ReadFile(database + ".bak");
@@ -420,7 +539,26 @@ namespace DiscArchive
 
         private void Write(List<Entry> entries)
         {
-            AtomicWrite(database, delegate(Stream stream) { Serializer.Serialize(stream, entries); });
+            // Keep local maintenance separate: older releases can continue writing
+            // catalog.xml without losing removals or mistaking manual rows for discs.
+            List<Entry> discs=new List<Entry>();
+            foreach(Entry e in entries) {
+                if(!e.ManualOnly) {
+                    Entry disc=e.ForAttempt(); disc.HiddenFromCatalog=false; discs.Add(disc);
+                }
+            }
+            AtomicWrite(database, delegate(Stream stream) { Serializer.Serialize(stream,discs); });
+        }
+
+        private void WriteLocal(List<Entry> entries)
+        {
+            List<Entry> local=new List<Entry>();
+            foreach(Entry e in entries) {
+                if(e.ManualOnly) local.Add(e);
+                else if(e.HiddenFromCatalog) local.Add(new Entry { Id=e.Id, RegistrationId=e.RegistrationId,
+                    Created=e.Created, TargetId=e.TargetId, HiddenFromCatalog=true });
+            }
+            AtomicWrite(localDatabase, delegate(Stream stream) { Serializer.Serialize(stream,local); });
         }
 
         private void WriteReplica(Entry e)
@@ -490,7 +628,10 @@ namespace DiscArchive
                 var records=Read();
                 var local=records.Find(x=>x.Id==origin.Id && x.TargetId==origin.TargetId &&
                     x.RegistrationId==origin.RegistrationId && x.Created==origin.Created);
-                if(local!=null) { CopyOutcome(local,run); Write(records); }
+                if(local!=null) {
+                    local.ImportedLocally=local.ImportedLocally || HasLocalImport(local);
+                    CopyOutcome(local,run); Write(records);
+                }
             }
         }
         private static void CopyOutcome(Entry dest,Entry run)
@@ -510,7 +651,8 @@ namespace DiscArchive
         {
             if (!IsOriginalTarget(targetAccess??e)) throw new IOException("目标硬盘已离线或不是原目标硬盘。");
             Directory.CreateDirectory(directory);
-            AtomicWrite(Path.Combine(directory, "entry.xml"), delegate(Stream stream) { Serializer.Serialize(stream, new List<Entry> { e }); });
+            Entry replica=e.ForAttempt(); replica.ManualOnly=false; replica.HiddenFromCatalog=false; replica.ImportedLocally=false;
+            AtomicWrite(Path.Combine(directory, "entry.xml"), delegate(Stream stream) { Serializer.Serialize(stream, new List<Entry> { replica }); });
             AtomicText(Path.Combine(directory, "登记信息.txt"),
                 "盘号：" + e.Id + "\r\n标题：" + e.Title + "\r\n标题确认：" + e.TitleState + "\r\n项目：" + e.Project + "\r\n状态：" + e.Status +
                 "\r\n目标硬盘：" + e.TargetName + "\r\n目标路径：" + e.TargetRoot + "\r\n原图：" + e.OriginalPhoto + "\r\n登记时间：" + e.Created +

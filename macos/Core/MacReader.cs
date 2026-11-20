@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 
 namespace DiscArchive;
@@ -36,7 +37,12 @@ internal sealed class MacReader : IReader
     private readonly InventoryFn inventory;
     private readonly FreeFn free;
     private readonly VerifyFn verify;
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr PrepareEjectFn([MarshalAs(UnmanagedType.LPUTF8Str)]string id,[MarshalAs(UnmanagedType.LPUTF8Str)]string token);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr TryEjectFn(IntPtr ticket);
     private readonly TracksFn tracks;
+    private readonly PrepareEjectFn prepareEject;
+    private readonly TryEjectFn tryEject;
+    private readonly FreeFn releaseEject;
     internal OpticalView View=OpticalView.Auto;
     internal MacReader()
     {
@@ -48,6 +54,9 @@ internal sealed class MacReader : IReader
         free=Marshal.GetDelegateForFunctionPointer<FreeFn>(NativeLibrary.GetExport(h,"da_free"));
         verify=Marshal.GetDelegateForFunctionPointer<VerifyFn>(NativeLibrary.GetExport(h,"da_verify"));
         tracks=Marshal.GetDelegateForFunctionPointer<TracksFn>(NativeLibrary.GetExport(h,"da_tracks"));
+        prepareEject=Marshal.GetDelegateForFunctionPointer<PrepareEjectFn>(NativeLibrary.GetExport(h,"da_eject_prepare"));
+        tryEject=Marshal.GetDelegateForFunctionPointer<TryEjectFn>(NativeLibrary.GetExport(h,"da_eject_try"));
+        releaseEject=Marshal.GetDelegateForFunctionPointer<FreeFn>(NativeLibrary.GetExport(h,"da_eject_release"));
     }
     private string Take(IntPtr p) {if(p==IntPtr.Zero)throw new IOException("macOS 无法枚举设备。");try{return Marshal.PtrToStringUTF8(p);}finally{free(p);}}
     internal MacInventory Snapshot()=>JsonSerializer.Deserialize<MacInventory>(Take(inventory()),Host.Json)??throw new IOException("设备清单无效。");
@@ -152,9 +161,57 @@ internal sealed class MacReader : IReader
                 opened=OpticalMount.Open(root,raw,guard,raw,View);
             }
             string note=TrackNote(d,true);if(note.Length>0) opened.UncoveredTracks=((opened.UncoveredTracks??"")+" "+note).Trim();
-            guard();return opened;
+            guard();
+            // Capture the physical device only at the end of reading. The caller
+            // invokes TryEject only after closing this source and archive receipt.
+            opened.PrepareEject=()=>new MacEjectTicket(prepareEject(d.id,d.token),p=>Take(tryEject(p)),p=>releaseEject(p));
+            return opened;
         }catch{opened?.Dispose();throw;}
     }
+}
+
+// A ticket is one-shot. The active worker owns the retained native references
+// until the OS call returns, even if the bounded caller wait has expired.
+internal sealed class MacEjectTicket : IOpticalEjectTicket
+{
+    private readonly object gate=new object();
+    private readonly Func<IntPtr,string> eject;
+    private readonly Action<IntPtr> release;
+    private readonly int timeoutMilliseconds;
+    private IntPtr handle;
+    private bool attempted,abandoned,started;
+    internal MacEjectTicket(IntPtr handle,Func<IntPtr,string> eject,Action<IntPtr> release,int timeoutMilliseconds=20000) {
+        this.handle=handle;this.eject=eject;this.release=release;this.timeoutMilliseconds=timeoutMilliseconds;
+    }
+    public bool TryEject(out string reason) {
+        Task<string> work;
+        lock(gate) {
+            if(attempted){reason="弹盘请求已处理；不会重复发送。";return false;}
+            attempted=true;
+            if(handle==IntPtr.Zero){reason="未能锁定原光驱和原介质；未发送弹盘请求。";return false;}
+            IntPtr owned=handle;handle=IntPtr.Zero;
+            work=Task.Run(()=>{
+                try {
+                    lock(gate){if(abandoned)return "";started=true;}
+                    return eject(owned);
+                }catch(Exception ex){return JsonSerializer.Serialize(new {ok=false,reason="弹盘请求未能完成："+ex.Message});}
+                finally{release(owned);}
+            });
+        }
+        if(!work.Wait(timeoutMilliseconds)) {
+            lock(gate) {
+                abandoned=true;
+                reason=started?"弹盘结果未知：macOS 尚未完成原生弹盘请求，可能稍后完成；不会重试，请勿立即换盘。":"弹盘等待超时；尚未启动的请求已取消，不会稍后发送。";
+            }
+            return false;
+        }
+        try {
+            using var report=JsonDocument.Parse(work.Result);
+            bool ok=report.RootElement.GetProperty("ok").GetBoolean();
+            reason=report.RootElement.GetProperty("reason").GetString()??"";return ok;
+        }catch(Exception ex){reason="弹盘结果未知：无法取得系统回执（"+ex.Message+"）；不会重试。";return false;}
+    }
+    public void Dispose(){IntPtr owned;lock(gate){owned=handle;handle=IntPtr.Zero;}if(owned!=IntPtr.Zero)release(owned);}
 }
 
 internal sealed class DarwinOpticalStream : Stream

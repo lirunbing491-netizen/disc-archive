@@ -19,7 +19,7 @@ $work = Join-Path ([IO.Path]::GetTempPath()) ('DiscArchive-PublicTests-' + [guid
 Write-Output ('Generated test artifacts: ' + $work)
 Write-Output 'No physical media or camera capture is used. UI construction may enumerate cameras read-only. No external network requests. Model requests use loopback only. RawOptical --drive is never passed by this runner.'
 $count = 0
-foreach ($name in @('CameraFileDate','Copy','Catalog','Plan','Rescue','Optical','Camera','CompletionNotice','VisionSettings','Endpoint','Workflow','MultiDrive','Identity','Alias','Choice','ContinuationWorkflow','PauseRestart','ArchiveReader','ArchiveTree','HfsGuard','Layout','RawOptical','SourcePipeline','OpticalMount','TrackInfo','MountCleanup','CloseOutcome')) {
+foreach ($name in @('CameraFileDate','Copy','Catalog','CatalogLocalEdit','CatalogUi','Plan','Rescue','Optical','OpticalEject','Camera','CameraKeys','CompletionNotice','VisionSettings','Endpoint','Workflow','MultiDrive','Identity','Alias','Choice','ContinuationWorkflow','PauseRestart','DamagedDiscRetry','RetryAction','ArchiveReader','ArchiveTree','HfsGuard','Layout','RawOptical','SourcePipeline','OpticalMount','TrackInfo','MountCleanup','CloseOutcome')) {
     $dir = Join-Path $work $name
     [void][IO.Directory]::CreateDirectory($dir)
     $exe = Join-Path $dir ($name + 'Tests.exe')

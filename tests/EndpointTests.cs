@@ -93,6 +93,7 @@ class EndpointTests
             Check(result=="Synthetic title","OpenAI compatible response parsed");
             Check(server.Calls==1 && server.RequestPath=="/v1/chat/completions" && server.Authorization=="Bearer test-secret-not-real","one request with model authorization");
             var data=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(server.Body);Check((string)data["model"]==opt.Model,"configured model sent");
+            Check(!data.ContainsKey("thinking"),"other compatible services receive no DeepSeek-specific parameter");
             var messages=(ArrayList)data["messages"];var message=(Dictionary<string,object>)messages[0];var content=(ArrayList)message["content"];var imageEntry=(Dictionary<string,object>)content[1];var imageUrl=(Dictionary<string,object>)imageEntry["image_url"];
             string uri=(string)imageUrl["url"];Check(uri.StartsWith("data:image/jpeg;base64,"),"actual image supplied inline");
             using(MemoryStream memory=new MemoryStream(Convert.FromBase64String(uri.Substring(uri.IndexOf(',')+1))))using(Bitmap sent=new Bitmap(memory)) {
@@ -115,6 +116,8 @@ class EndpointTests
             string error=Fails(()=>VisionEndpoint.Read(Options(server),photo,CancellationToken.None));Check(error.Contains("401")&&!error.Contains("secret"),"HTTP failure sanitized");
         }
         using(Server server=new Server(200,"{}",0,null))Check(Fails(()=>VisionEndpoint.Read(Options(server),photo,CancellationToken.None)).Contains("格式"),"malformed model response rejected");
+        using(Server server=new Server(200,"{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"unfinished\"}}]}",0,null))
+            Check(Fails(()=>VisionEndpoint.Read(Options(server),photo,CancellationToken.None)).Contains("输出额度"),"truncated transcript is not used to name a project");
         using(Server server=new Server(200,"{}",0,null)) {
             Check(Fails(()=>VisionEndpoint.Read(Options(server),blank,CancellationToken.None)).Contains("未发送")&&server.Calls==0,"uncertain disc never uploads full photo");
         }

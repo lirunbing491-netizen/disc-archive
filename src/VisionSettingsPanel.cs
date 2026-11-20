@@ -87,7 +87,7 @@ namespace DiscArchive
         {
             modelGroup.Visible = mode.SelectedIndex == 2;
             explanation.Text = mode.SelectedIndex == 2
-                ? "保存后，拍照、选图、拖入、自动接收照片和重读已登记光盘时，均会将盘面图发送到你指定的服务。"
+                ? "保存后，拍照、选图、拖入或重读光盘时，程序会把盘面图发给所填服务。转录文字可在登记册的“归类依据”中查看。"
                 : mode.SelectedIndex == 1
                 ? "本机文字识别：在这台电脑上识别盘面文字，不调用你填写的看图模型。"
                 : "仅卷标与元数据：使用光盘卷标与文件信息，不请求模型，也不运行文字识别。";

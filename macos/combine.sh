@@ -22,5 +22,10 @@ codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$app/Contents/MacOS/DiscArchive" --check-package
 "$app/Contents/MacOS/DiscArchive" --check-workbench
-ditto -c -k --keepParent "$app" "$out/DiscArchive-macOS-Universal.zip"
+# Ship the same human-readable handbook alongside the app, accessible in Finder.
+delivery="$out/distribution"
+mkdir "$delivery"
+ditto "$app" "$delivery/DiscArchive.app"
+cp "$app/Contents/Resources/使用说明.txt" "$delivery/"
+(cd "$delivery" && /usr/bin/ditto -c -k . "$out/DiscArchive-macOS-Universal.zip")
 (cd "$out" && shasum -a 256 DiscArchive-macOS-Universal.zip > SHA256.txt)

@@ -166,6 +166,12 @@ namespace DiscArchive
                     new {type="image_url",image_url=new {url="data:image/jpeg;base64,"+photo}}
                 }}}}
             };
+            // DeepSeek Flash defaults to thinking. A short label transcription
+            // needs its small output budget for the visible answer.
+            if (endpoint.Scheme == "https" && endpoint.IsDefaultPort &&
+                endpoint.Host.Equals("api.deepseek.com", StringComparison.OrdinalIgnoreCase) &&
+                (opt.Model.Trim() == "deepseek-flash" || opt.Model.Trim() == "deepseek-v4-flash-vision-exp"))
+                payload["thinking"] = new { type = "disabled" };
             byte[] body = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(payload));
             ct.ThrowIfCancellationRequested();
             HttpWebRequest request = (HttpWebRequest)WebRequest.Create(endpoint);
@@ -212,6 +218,9 @@ namespace DiscArchive
                 var data = new JavaScriptSerializer { MaxJsonLength = 131072 }.Deserialize<Dictionary<string, object>>(json);
                 var choices = data["choices"] as ArrayList;
                 var first = choices[0] as Dictionary<string, object>;
+                object finish;
+                if (first.TryGetValue("finish_reason", out finish) && (finish as string) == "length")
+                    throw new InvalidOperationException("模型在文字转录完成前用尽了输出额度，本次按盘上信息归类。");
                 var message = first["message"] as Dictionary<string, object>;
                 string text = message["content"] as string;
                 if (text == null) throw new FormatException();

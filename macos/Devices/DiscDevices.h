@@ -20,6 +20,15 @@ char *da_tracks(const char *drive, const char *token);
  * partial names survive enumeration errors. Cleanup diagnostics are note only
  * and never invalidate a completed listing. Same allocation/free convention. */
 char *da_list_directory(int fd);
+/* Capture only; does not unmount/eject. Binds this process's token and retains
+ * the physical DiscRecording device and IOKit provider, never a BSD pathname.
+ * da_eject_try consumes one attempt and returns JSON {ok:bool,reason:string}.
+ * Call only after source handles and archive receipts have closed. Native eject
+ * includes normal unmount; no force flag. Synchronous OS call has no cancellation.
+ * Release the ticket with da_eject_release, not da_free. */
+void *da_eject_prepare(const char *drive, const char *token);
+char *da_eject_try(void *ticket);
+void da_eject_release(void *ticket);
 void da_free(void *pointer);
 #ifdef __cplusplus
 }

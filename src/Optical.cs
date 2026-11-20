@@ -94,7 +94,43 @@ namespace DiscArchive
         private string identity;
         private string rawMapping;
         private uint changeCount;
-        private bool hasCount, locked, disposed, failed;
+        private bool hasCount, locked, disposed, failed, ejectRetained;
+
+        // Capture while this lease is live. The ticket keeps these original
+        // device handles and the tray lock alive across source-reader cleanup.
+        internal IOpticalEjectTicket CreateEjectTicket()
+        {
+            lock(sync)
+            using(new OpticalNative.ErrorMode())
+            {
+                if(disposed || failed || ejectRetained)
+                    return OpticalEjectTicket.Unavailable("原盘保护已结束、失效或已交给弹盘凭据；光盘保留。");
+                OpticalEjectDevice device=null;
+                try
+                {
+                    VerifyCore();
+                    string bound=OpticalNative.DeviceIdentity(root,handle);
+                    device=new OpticalEjectDevice(root);
+                    if(!String.Equals(bound,device.Identity,StringComparison.Ordinal))
+                        throw new IOException("弹盘句柄与读取光盘的物理设备不一致。");
+                    uint baseline=device.Count();
+                    VerifyCore();
+                    ejectRetained=true;
+                    return new OpticalEjectTicket(device,baseline,delegate {
+                        lock(sync) {
+                            if(!disposed)throw new IOException("来源读取尚未结束，不能弹盘。");
+                            if(failed)throw new IOException("原盘保护已经失效。");
+                            using(new OpticalNative.ErrorMode()) VerifyCore();
+                        }
+                    },ReleaseEjectRetention);
+                }
+                catch(Exception error)
+                {
+                    if(device!=null)device.Dispose();
+                    return OpticalEjectTicket.Unavailable("无法建立安全弹盘保护："+error.Message+" 光盘保留。");
+                }
+            }
+        }
 
         internal OpticalLease(string root) : this(root, false) { }
 
@@ -202,15 +238,35 @@ namespace DiscArchive
             {
                 if (disposed) return;
                 disposed = true;
-                if (handle != null)
+                if(ejectRetained)return;
+                ReleaseHandles();
+            }
+        }
+
+        private void ReleaseHandles(bool requireUnlock = false)
+        {
+            if (handle != null)
+            {
+                try
                 {
-                    try
-                    {
-                        using (new OpticalNative.ErrorMode())
-                            if (locked && !handle.IsInvalid && !handle.IsClosed) OpticalNative.Lock(handle, false);
-                    }
-                    finally { handle.Dispose(); if(counterHandle!=null)counterHandle.Dispose(); }
+                    using (new OpticalNative.ErrorMode())
+                        if (locked && !handle.IsInvalid && !handle.IsClosed) {
+                            bool released=OpticalNative.Lock(handle, false);
+                            if(requireUnlock && !released)throw OpticalNative.Error("无法释放原盘锁，已保留光盘");
+                        }
                 }
+                finally { handle.Dispose(); if(counterHandle!=null)counterHandle.Dispose(); handle=null; counterHandle=null; locked=false; }
+            }
+        }
+
+        private void ReleaseEjectRetention()
+        {
+            lock(sync)
+            {
+                ejectRetained=false;
+                // Cancelling a prepared ticket before source cleanup must
+                // leave the still-live reading lease owning its handles.
+                if(disposed)ReleaseHandles(true);
             }
         }
     }

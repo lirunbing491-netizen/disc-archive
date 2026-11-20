@@ -16,6 +16,11 @@ namespace DiscArchive
         MountedDisc Open(string drive);
     }
 
+    internal interface IOpticalEjectTicket : IDisposable
+    {
+        bool TryEject(out string reason);
+    }
+
     internal sealed class MountedDisc : IDisposable
     {
         internal readonly string Root, VolumeLabel;
@@ -23,6 +28,7 @@ namespace DiscArchive
         internal readonly string Format;
         internal string UncoveredTracks;
         internal readonly Action Verify;
+        internal Func<IOpticalEjectTicket> PrepareEject;
         private readonly IDisposable lease;
         internal MountedDisc(string root,string label,Action verify,IDisposable guard,DiscSource source=null,string format="Windows 文件视图")
         { Root=root; VolumeLabel=label; Verify=verify; lease=guard; Source=source??DiscSource.Windows; Format=format; }
@@ -54,13 +60,15 @@ namespace DiscArchive
                 using(IEnumerator<string> probe=DirectoryProbe(drive)) {
                     if(probe!=null) {
                         OpticalLease lease=Optical.Acquire(drive);
-                        try { var info=new DriveInfo(drive);return new MountedDisc(drive,info.VolumeLabel,lease.Verify,lease,null,info.DriveFormat+"（Windows 文件视图）"); }
+                        try { var info=new DriveInfo(drive);return new MountedDisc(drive,info.VolumeLabel,lease.Verify,lease,null,info.DriveFormat+"（Windows 文件视图）") { PrepareEject=lease.CreateEjectTicket }; }
                         catch { lease.Dispose(); throw; }
                     }
                 }
             }
             RawOptical raw=RawOptical.Open(drive);
-            return OpticalMount.Open(drive,raw.Data,raw.Verify,raw,view);
+            MountedDisc disc=OpticalMount.Open(drive,raw.Data,raw.Verify,raw,view);
+            disc.PrepareEject=raw.CreateEjectTicket;
+            return disc;
         }
         private static IEnumerator<string> DirectoryProbe(string drive)
         {
@@ -86,6 +94,8 @@ namespace DiscArchive
         internal bool EmptySeen { get; private set; }
         internal bool ManualOnly { get; private set; }
         internal bool Busy { get { return cancellation != null; } }
+        internal string LastEjectNote { get; private set; }
+        internal bool LastEjectAccepted { get; private set; }
         private CancellationTokenSource cancellation;
         private sealed class PhotoResult { internal string Text, Note; }
         private Task<PhotoResult> reading;
@@ -134,16 +144,18 @@ namespace DiscArchive
             return created;
         }
 
-        internal void Retry(Entry e, string drive)
+        internal void Retry(Entry e, string drive,bool readyAlreadyChecked=false)
         {
             if (Current != null) throw new InvalidOperationException("当前光驱已有任务。");
-            if (String.IsNullOrEmpty(drive) || Array.IndexOf(Reader.Drives(), drive) < 0) throw new IOException("请先在导盘页选择光驱。");
+            if (String.IsNullOrEmpty(drive) || (!readyAlreadyChecked && Array.IndexOf(Reader.Drives(), drive) < 0)) throw new IOException("请先在导盘页选择光驱。");
             RequireTarget(e);
             e=e.ForAttempt(); retry=true; protectPrevious=true;
             e.Drive = drive;
             e.Status = Waiting;
             e.Note = "等待重新读取。原有尝试记录保留。";
-            Arm(e,Reader.Empty(drive));
+            // A ready disc was present at the retry action. Only CanStart on the
+            // worker and the guarded Open are authoritative for the next read.
+            Arm(e,!readyAlreadyChecked && Reader.Empty(drive));
         }
 
         internal Entry ResumeKnown(string root,string id,string drive)
@@ -217,9 +229,36 @@ namespace DiscArchive
         internal async Task<Entry> Copy(Action<string> progress)
         {
             if (Busy || Current == null) throw new InvalidOperationException("没有可读取的盘。");
-            Entry e = Current;
             cancellation = new CancellationTokenSource();
             CancellationToken token = cancellation.Token;
+            LastEjectNote = "";
+            LastEjectAccepted = false;
+            IOpticalEjectTicket ticket=null;
+            try {
+                Entry finished=null;
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo failure=null;
+                try { finished=await CopyCore(progress,token,t=>ticket=t); }
+                catch(Exception ex) { failure=System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+                if(ticket!=null) {
+                    bool committed=failure==null && finished.Status==Done && String.IsNullOrEmpty(LastEjectNote);
+                    bool accepted=false;
+                    LastEjectNote=await Task.Run(()=>FinishEject(ticket,committed,token,LastEjectNote,out accepted));
+                    LastEjectAccepted=accepted;
+                }
+                if(failure!=null)failure.Throw();
+                return finished;
+            }
+            finally {
+                cancellation.Dispose();
+                cancellation=null;
+                EndPhoto();
+                Current=null;
+            }
+        }
+
+        private async Task<Entry> CopyCore(Action<string> progress,CancellationToken token,Action<IOpticalEjectTicket> bindTicket)
+        {
+            Entry e=Current;
             string attemptName = "抢救-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N").Substring(0, 6);
             string attempt = Path.Combine(e.JobDir, attemptName);
             RescueResult result=null;
@@ -325,6 +364,16 @@ namespace DiscArchive
                         return RescueCopy.Run(disc.Root,e.TargetRoot,plan.Folder,plan.TopFolders,canonical,attempt,progress,verify,token,context.Folder,continuation && !strong,disc.Source);
                     });
                     RequireTarget(e);
+                    // Bind to this exact medium before closing its read handle. A
+                    // partial or unverified result never even prepares an eject.
+                    if (result.Files>0 && result.Failed==0 && String.IsNullOrEmpty(e.SourceCoverage) &&
+                        !token.IsCancellationRequested && disc.PrepareEject!=null) {
+                        try { bindTicket(await Task.Run(disc.PrepareEject)); }
+                        catch(Exception ex) {
+                            if(!RecoverableEjectError(ex)) throw;
+                            LastEjectNote="未能准备自动弹盘，请手动取盘。"+ex.Message;
+                        }
+                    }
                 }
                 catch(Exception ex)
                 {
@@ -354,6 +403,7 @@ namespace DiscArchive
                     Book.CompleteOrigin(e,session.Original);
                 } catch(IOException ex) {
                     e.Note+=" 原盘汇总写入未完成："+ex.Message; Book.Save(e);
+                    if(e.Status==Done) LastEjectNote="归档汇总未写完，已保留光盘。";
                 }
             }
             catch (Exception ex)
@@ -376,12 +426,38 @@ namespace DiscArchive
             finally
             {
                 if(session!=null) session.Dispose();
-                cancellation.Dispose();
-                cancellation = null;
-                EndPhoto();
-                Current = null;
             }
             return e;
+        }
+
+        private static string FinishEject(IOpticalEjectTicket ticket,bool committed,CancellationToken token,string note,out bool accepted)
+        {
+            accepted=false;
+            try {
+                if(committed) {
+                    if(token.IsCancellationRequested) note="已请求停止，光盘留在光驱中。";
+                    else {
+                        string reason;
+                        accepted=ticket.TryEject(out reason);
+                        note=accepted ? "光驱已接受弹盘指令，可以取盘。" : reason;
+                    }
+                }
+            } catch(Exception ex) {
+                if(!RecoverableEjectError(ex))throw;
+                note="自动弹盘未完成，请手动取盘。"+ex.Message;
+            } finally {
+                try {ticket.Dispose();}
+                catch(Exception ex) {
+                    if(!RecoverableEjectError(ex))throw;
+                    note=(note+" 弹盘设备收尾提示："+ex.Message).Trim();
+                }
+            }
+            return note;
+        }
+
+        private static bool RecoverableEjectError(Exception error)
+        {
+            return !(error is OutOfMemoryException || error is AccessViolationException || error is ThreadAbortException);
         }
 
         private static string CloseMessage(Exception error)

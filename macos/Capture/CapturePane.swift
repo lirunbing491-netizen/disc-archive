@@ -22,6 +22,13 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private var running = false
     private var capturing = false
     private var generation = UUID()
+    private var cameraPageActive = false
+    private var previewReadyAt = Date.distantPast
+    private var frameGeneration = UUID() // Accessed only on the camera queue.
+    private var shortcutGate = CaptureShortcutGate()
+    private var keyMonitor: Any?
+    private var menuObservers: [NSObjectProtocol] = []
+    private var menuTrackingDepth = 0
 
     init(beforeCapture: @escaping () throws -> String, onPhoto: @escaping (URL, String) -> Void) {
         self.beforeCapture = beforeCapture; self.onPhoto = onPhoto
@@ -39,16 +46,49 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
         stack.alignment = .leading; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor), stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor), surface.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self = self else { return event }
+            return self.handleShortcut(event)
+        }
+        menuObservers = [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                self.menuTrackingDepth = max(0, self.menuTrackingDepth + (name == NSMenu.didBeginTrackingNotification ? 1 : -1))
+            }
+        }
         refreshDevices(); updateButtons()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func layout() { super.layout(); previewLayer?.frame = surface.bounds }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window == nil { stopPreview() } }
-    deinit { let s = session; queue.async { s.stopRunning(); s.inputs.forEach { s.removeInput($0) }; s.outputs.forEach { s.removeOutput($0) } } }
+    deinit {
+        if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
+        menuObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        let s = session; queue.async { s.stopRunning(); s.inputs.forEach { s.removeInput($0) }; s.outputs.forEach { s.removeOutput($0) } }
+    }
+
+    func setCameraPageActive(_ active: Bool) { cameraPageActive = active; shortcutGate.reset() }
+    private func handleShortcut(_ event: NSEvent) -> NSEvent? {
+        guard CaptureShortcutGate.keys.contains(event.keyCode) else { return event }
+        if event.type == .keyUp { shortcutGate.release(event.keyCode); return event }
+        let blockedModifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let focusedControl = window?.firstResponder as? NSControl
+        let editing = window?.firstResponder is NSTextView || (focusedControl != nil && focusedControl !== shutter)
+        let ready = cameraPageActive && !isHiddenOrHasHiddenAncestor && window?.isKeyWindow == true &&
+            NSApp.isActive && NSApp.modalWindow == nil && window?.attachedSheet == nil &&
+            menuTrackingDepth == 0 && !editing && blockedModifiers.isEmpty &&
+            shutter.isEnabled && Date().timeIntervalSince(previewReadyAt) < 1.5
+        if shortcutGate.press(event.keyCode, isRepeat: event.isARepeat, eligible: ready) {
+            // Mouse and keyboard always resolve the slot and capture through one action.
+            shutter.performClick(nil); return nil
+        }
+        // Suppress repeat/default-button activation while this shortcut owns the key.
+        return shortcutGate.owns(event.keyCode) ? nil : event
+    }
 
     func setCaptureEnabled(_ enabled: Bool) { self.enabled = enabled; updateButtons() }
     private func updateButtons() {
-        shutter.isEnabled = enabled && running && !capturing
+        shutter.isEnabled = enabled && running && previewReadyAt != .distantPast && !capturing
         cameras.isEnabled = !running && !capturing
         previewButton.isEnabled = !running && !devices.isEmpty && !capturing
         stopButton.isEnabled = running || capturing
@@ -65,7 +105,7 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
     @objc private func cameraChanged() { stopPreview() }
     @objc private func stopAction() { stopPreview() }
     func stopPreview() {
-        generation = UUID(); running = false; capturing = false
+        generation = UUID(); running = false; capturing = false; previewReadyAt = .distantPast
         previewLayer?.removeFromSuperlayer(); previewLayer = nil
         queue.async { [weak self] in
             guard let self = self else { return }
@@ -111,13 +151,13 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
                 self.session.addInput(input); self.session.addOutput(output)
                 if self.session.canSetSessionPreset(.high) { self.session.sessionPreset = .high }
-                self.session.commitConfiguration(); self.session.startRunning()
+                self.session.commitConfiguration(); self.frameGeneration = token; self.session.startRunning()
                 DispatchQueue.main.async {
                     guard self.generation == token else { return }
                     self.running = self.session.isRunning
                     let layer = AVCaptureVideoPreviewLayer(session: self.session); layer.videoGravity = .resizeAspect
                     layer.frame = self.surface.bounds; self.surface.layer?.addSublayer(layer); self.previewLayer = layer
-                    self.status.stringValue = self.running ? "预览中。拍摄时绑定当前盘槽；预览不镜像、不裁切保存的照片。" : "摄像头未能启动，请重新选择设备。"
+                    self.status.stringValue = self.running ? "预览中。按 Enter 或空格拍摄；输入文字、弹窗或菜单打开时不触发。拍摄绑定当前盘槽，保存完整画面。" : "摄像头未能启动，请重新选择设备。"
                     self.updateButtons()
                 }
             } catch {
@@ -127,6 +167,11 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         latestPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer); latestSampleAt = Date()
+        let token = frameGeneration, sampledAt = latestSampleAt
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == token, self.running else { return }
+            self.previewReadyAt = sampledAt; self.updateButtons()
+        }
     }
     @objc private func takePhoto() {
         guard enabled, running, !capturing else { return }
@@ -157,6 +202,20 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
     }
+}
+
+/// Pure key state, so held-key and eligibility behavior can be tested without a camera.
+struct CaptureShortcutGate {
+    static let keys: Set<UInt16> = [36, 49, 76] // Return, Space, keypad Enter.
+    private var held: Set<UInt16> = []
+    private var owned: Set<UInt16> = []
+    mutating func press(_ key: UInt16, isRepeat: Bool, eligible: Bool) -> Bool {
+        guard Self.keys.contains(key), held.insert(key).inserted, !isRepeat, eligible else { return false }
+        owned.insert(key); return true
+    }
+    func owns(_ key: UInt16) -> Bool { owned.contains(key) }
+    mutating func release(_ key: UInt16) { held.remove(key); owned.remove(key) }
+    mutating func reset() { held.removeAll(); owned.removeAll() }
 }
 
 struct CaptureFailure: LocalizedError {

@@ -29,6 +29,8 @@ namespace DiscArchive
             internal bool Polling, Connected;
             internal readonly Workstation Worker;
             internal Button Indicator;
+            internal Entry RetryEntry;
+            internal bool RetryChecking;
             internal DriveSlot(string drive, Workstation worker) { Drive=drive; Worker=worker; }
         }
         private readonly CompletionNotice finishNotice;
@@ -38,8 +40,8 @@ namespace DiscArchive
         private readonly Button inspectDisc=ButtonOf("检测盘格式…");
         private Button useExisting;
         private readonly Button chooseTarget = ButtonOf("选择文件夹"), pick = ButtonOf("选择盘面照片…"), refresh = ButtonOf("刷新光驱"),
-            watchButton = ButtonOf("自动接收照片…"), manual = ButtonOf("核对已放入的盘…"), stop = ButtonOf("暂停本张…");
-        private readonly Label headline = LabelOf("", 17), info = LabelOf("", 10), detail = LabelOf("", 10), watchLabel = LabelOf("照片来源：手动选择或拖入", 9);
+            manual = ButtonOf("核对已放入的盘…"), stop = ButtonOf("暂停本张…"), retryDisc=ButtonOf("重试这张盘");
+        private readonly Label headline = LabelOf("", 17), info = LabelOf("", 10), detail = LabelOf("", 10);
         private readonly PictureBox picture = Picture();
         private readonly TabControl tabs = new TabControl();
         private CameraPanel camera;
@@ -49,10 +51,8 @@ namespace DiscArchive
         private readonly Label cameraJob = LabelOf("",11);
         private bool shutterEmpty;
         private readonly Timer timer = new Timer { Interval = 900 };
-        private FileSystemWatcher watcher;
-        private DateTime settleUntil, photoDeadline;
         private bool closeLater, confirmingExit, muteSelection;
-        private string nextPhoto, targetId = "";
+        private string targetId = "";
         private List<Entry> entries;
 
         internal MainForm(string state, IReader reader) : this(state,reader,new CompletionNotice()) { }
@@ -67,7 +67,7 @@ namespace DiscArchive
             this.reader=reader;
             Workstation.RecoverInterrupted(book);
             selectedSlot=NewSlot(""); station=selectedSlot.Worker;
-            Text = "导盘助手 · 光盘兼容测试版";
+            Text = "导盘助手 · 登记册试用版";
             Font = new Font("Microsoft YaHei UI", 10);
             AutoScaleMode = AutoScaleMode.Dpi;
             StartPosition = FormStartPosition.CenterScreen;
@@ -89,7 +89,7 @@ namespace DiscArchive
             timer.Tick += async delegate { await Tick(); };
             Shown += delegate { timer.Start(); };
             FormClosing += ClosingForm;
-            FormClosed += delegate { timer.Dispose(); EndWatch(); finishNotice.Dispose(); SetPhoto(picture, null); SetPhoto(recordPhoto, null); };
+            FormClosed += delegate { timer.Dispose(); finishNotice.Dispose(); SetPhoto(picture, null); SetPhoto(recordPhoto, null); };
         }
 
         private bool Active { get { return station.Current != null; } }
@@ -188,13 +188,17 @@ namespace DiscArchive
                 }catch(Exception ex){if(!IsDisposed)Notice(slot.Drive+" 格式检测未完成："+ex.Message);}
                 finally { slot.Polling=false; if(!IsDisposed && !Disposing) SyncButtons(); }
             };
-            AddWide(c,Flow(pick, watchButton),3); AddWide(c,watchLabel,4);
+            AddWide(c,Flow(pick),3); AddWide(c,LabelOf("可用摄像头拍盘面，也可手选或拖入一张已有照片。",9),4);
             TableLayoutPanel body = Table(-34,-66); Row(body,-100);
             body.Controls.Add(picture,0,0);
             TableLayoutPanel right = Table(-100); right.Padding = new Padding(12,0,4,0);
             Row(right,55); Row(right,58); Row(right,-100);
             right.Controls.Add(headline,0,0); right.Controls.Add(info,0,1); right.Controls.Add(detail,0,2); body.Controls.Add(right,1,0);
-            AddWide(c,body,5); AddWide(c,Flow(manual,stop),6);
+            var handbook=ButtonOf("使用说明");
+            handbook.Click+=delegate { UserAction(OpenHandbook); };
+            HelpRequested+=delegate(object sender,HelpEventArgs e) { e.Handled=true; UserAction(OpenHandbook); };
+            AddWide(c,body,5); AddWide(c,Flow(manual,stop,retryDisc,handbook),6);
+            retryDisc.Click+=async delegate { await RetrySlot(selectedSlot,selectedSlot.RetryEntry); };
             BuildLibrary(library);
             TabPage cameraPage = new TabPage("  摄像头  ") { BackColor = Color.White, Padding = new Padding(8) };
             tabs.TabPages.Add(cameraPage);
@@ -213,6 +217,7 @@ namespace DiscArchive
             cameraLayout.Controls.Add(camera,0,0); cameraLayout.Controls.Add(cameraJob,0,1);
             Button details=ButtonOf("回导盘页查看 / 停止"); details.Click+=delegate { tabs.SelectedIndex=0; };
             cameraLayout.Controls.Add(details,0,2); cameraPage.Controls.Add(cameraLayout);
+            InstallCameraKeys(cameraPage);
             Button snap=ButtonOf("用摄像头拍盘面"); snap.Click+=delegate { tabs.SelectedTab=cameraPage; };
             FlowLayoutPanel photoBar=(FlowLayoutPanel)pick.Parent;
             photoBar.Controls.Add(snap); photoBar.Controls.SetChildIndex(snap,0);
@@ -229,13 +234,18 @@ namespace DiscArchive
             chooseTarget.Click += delegate { UserAction(delegate {
                 string path = ArchiveFolder("选择存放光盘资料的位置", target.Text); if (path == null) return;
                 if (!path.StartsWith(@"\\") && new DriveInfo(Path.GetPathRoot(path)).DriveType == DriveType.CDRom) throw new IOException("请选择可写的硬盘或共享文件夹。");
-                target.Text = path; targetId = ""; EndWatch(); SaveSettings(); SyncButtons();
+                target.Text = path; targetId = ""; SaveSettings(); SyncButtons();
             }); };
             refresh.Click += delegate { RefreshDrives(drives.Text); SyncButtons(); };
             drives.SelectedIndexChanged+=delegate { if(!rebuildingDrives) SelectDrive(); };
+            drives.SelectionChangeCommitted+=delegate {
+                BeginInvoke((Action)delegate {
+                    if(!IsDisposed && !Disposing && tabs.SelectedTab==cameraPage && drives.Focused && !drives.DroppedDown)
+                        camera.FocusPreviewForShutter();
+                });
+            };
             pick.Click += delegate { using (OpenFileDialog dlg = new OpenFileDialog { Title="选择这一张光盘的盘面照片",Filter="盘面照片|*.jpg;*.jpeg;*.png;*.bmp;*.tif;*.tiff" })
                 if (dlg.ShowDialog(this) == DialogResult.OK) UserAction(delegate { Register(dlg.FileName); }); };
-            watchButton.Click += delegate { UserAction(ToggleWatch); };
             stop.Click += delegate { UserAction(delegate {
                 DriveSlot slot=selectedSlot; Entry original=slot.Worker.Current;
                 if(original==null || !Confirm("暂停 "+slot.Drive+" 的 "+original.Id+"？已完成的文件保留，下次可换光驱按盘号续导，其他光驱继续读取。")) return;
@@ -261,7 +271,6 @@ namespace DiscArchive
                 bool online=connected.Contains(slot.Drive);
                 if(slot.Connected && !online) {
                     slot.Worker.BlockAutomatic();
-                    if(inboxSlot==slot) PauseInbox("绑定的光驱已断开。");
                 }
                 slot.Connected=online;
             }
@@ -283,7 +292,10 @@ namespace DiscArchive
                     string drive=slot.Drive;
                     drives.Items.Add(drive);
                     slot.Indicator=ButtonOf(drive);
-                    slot.Indicator.Click+=delegate { drives.SelectedItem=drive; };
+                    slot.Indicator.Click+=delegate {
+                        drives.SelectedItem=drive;
+                        if(camera!=null && camera.Visible) camera.FocusPreviewForShutter();
+                    };
                     driveOverview.Controls.Add(slot.Indicator);
                 }
                 if(preferred!=null && drives.Items.Contains(preferred)) drives.SelectedItem=preferred;
@@ -364,8 +376,9 @@ namespace DiscArchive
             refresh.Enabled = drives.Enabled = !closeLater;
             pick.Enabled=idle && selectedSlot.Connected && !closeLater;
             inspectDisc.Enabled=filesystemView.Enabled=pick.Enabled && !selectedSlot.Polling && reader is SystemReader;
-            watchButton.Enabled = (pick.Enabled || watcher!=null) && !closeLater;
             manual.Enabled = Active && !station.Busy; stop.Enabled = Active;
+            retryDisc.Visible=selectedSlot.RetryEntry!=null;
+            retryDisc.Enabled=CanRetry(selectedSlot,selectedSlot.RetryEntry);
             if(camera!=null) camera.SetCaptureEnabled(pick.Enabled && !String.IsNullOrEmpty(target.Text));
             if(visionPanel!=null) visionPanel.SetEditable(!AnyActive && !closeLater);
         }
@@ -406,8 +419,6 @@ namespace DiscArchive
         {
             if(closeLater || slot.Worker.Current!=null || slot.Polling) throw new InvalidOperationException(slot.Drive+" 上一张盘尚未结束。");
             if(!slot.Connected) throw new IOException("请选择一台已连接的光驱。");
-            if(nextPhoto!=null && inboxSlot!=slot && String.Equals(nextPhoto,path,StringComparison.OrdinalIgnoreCase))
-                throw new IOException("这张新照片正等待分配到 "+inboxSlot.Drive+"。如需改变归属，请先停止自动接收。");
             if (!IsPhoto(path)) throw new IOException("请选择 JPG、PNG、BMP 或 TIFF 盘面照片。");
             if (!Directory.Exists(target.Text)) throw new IOException("请先选择已连接的归档硬盘文件夹。");
             string hint=slot==selectedSlot ? project.Text : slot.ProjectHint;
@@ -415,7 +426,6 @@ namespace DiscArchive
             Entry e=slot.Worker.Register(path,target.Text,targetId,slot.Drive,hint,emptyAtShutter,chosen);
             slot.ExistingProject="";
             slot.ProjectHint=""; if(slot==selectedSlot) project.Clear();
-            if(inboxSlot==slot && String.Equals(nextPhoto,path,StringComparison.OrdinalIgnoreCase)) nextPhoto=null;
             targetId=e.TargetId;
             ArmSlot(slot,e);
             SaveSettings();
@@ -423,6 +433,8 @@ namespace DiscArchive
         private void ShowArmed(Entry e) { ArmSlot(selectedSlot,e); }
         private void ArmSlot(DriveSlot slot,Entry e)
         {
+            if(slot.RetryEntry!=null) finishNotice.ClearDrive(slot.Drive);
+            slot.RetryEntry=null;
             slot.ArmedAt=DateTime.UtcNow; slot.Photo=e.Photo; slot.Heading=e.Id; slot.LastResult=""; slot.Progress=null;
             slot.Info=slot.Worker.EmptySeen ? "照片已登记。请把这张盘放入 "+e.Drive : "请取出 "+e.Drive+" 的上一张盘，等提示后放入本张。";
             slot.Detail=(vision.Mode=="metadata" ? "按盘上信息归类。":"正在识别盘面。")+" 若本张已在光驱中，可以手动核对。";
@@ -432,7 +444,6 @@ namespace DiscArchive
         private async Task Tick()
         {
             if (IsDisposed || Disposing || closeLater || confirmingExit) return;
-            TakeNewPhoto();
             DriveSlot[] active=slots.Values.Where(s=>s.Worker.Current!=null).ToArray();
             foreach(var slot in active) RenderSlot(slot);
             // Start every eligible probe before awaiting any drive's copy operation.
@@ -461,9 +472,19 @@ namespace DiscArchive
                     string counts="完整 "+result.Files+" 个文件（"+SizeText(result.Bytes)+"），其中沿用 "+result.ReusedFiles+" 个，本次新拷 "+(result.Files-result.ReusedFiles)+" 个，失败条目 "+result.Failed+"。";
                     slot.LastResult=result.Status; slot.Heading=heading; slot.Info=result.Id+"　"+counts;
                     slot.Progress=null; slot.Detail=result.Project+"\n"+result.Note;
+                    string ejectNote=worker.LastEjectNote;
+                    if(result.Status==Workstation.Done && !String.IsNullOrEmpty(ejectNote) && !worker.LastEjectAccepted) {
+                        heading="已拷出，未自动弹盘，请手动取盘";
+                        slot.Heading=heading;
+                    }
+                    if(!String.IsNullOrEmpty(ejectNote))slot.Detail+="\n"+ejectNote;
+                    slot.RetryEntry=Retryable(result) ? result : null;
                     string noticeText=result.Project+"　"+result.Id+"\r\n"+counts;
                     if(result.Status!=Workstation.Done) noticeText+="\r\n"+result.Note;
-                    if(!closeLater) finishNotice.ShowDrive(this,slot.Drive,heading,noticeText,result.Status!=Workstation.Done);
+                    if(!String.IsNullOrEmpty(ejectNote))noticeText+="\r\n"+ejectNote;
+                    Entry retryResult=slot.RetryEntry;
+                    Action retryAction=retryResult==null ? (Action)null : async delegate { await RetrySlot(slot,retryResult); };
+                    if(!closeLater) finishNotice.ShowDrive(this,slot.Drive,heading,noticeText,result.Status!=Workstation.Done,retryAction);
                     Reload();
                 }
                 else if (explicitMatch) Notice("光驱还没有可读取的文件系统。可稍等再试；一直读不出时，请停止本张并保留实盘。");
@@ -482,6 +503,12 @@ namespace DiscArchive
             }
         }
         private static string SizeText(long n) { return n >= 1073741824 ? (n/1073741824d).ToString("0.00")+" GB" : (n/1048576d).ToString("0.##")+" MB"; }
+        private static void OpenHandbook()
+        {
+            string file=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"使用说明.txt");
+            if(!File.Exists(file)) throw new FileNotFoundException("请完整解压发布包，使用说明与程序在同一个文件夹。");
+            Process.Start(new ProcessStartInfo(file) {UseShellExecute=true});
+        }
         private void UserAction(Action a) { try { a(); } catch (Exception ex) { Notice(ex.Message); } }
         private void Notice(string msg) { MessageBox.Show(this,msg,"导盘助手",MessageBoxButtons.OK,MessageBoxIcon.Information); }
         private bool Confirm(string msg) { return MessageBox.Show(this,msg,"请核对",MessageBoxButtons.YesNo,MessageBoxIcon.Question,MessageBoxDefaultButton.Button2)==DialogResult.Yes; }
@@ -495,7 +522,7 @@ namespace DiscArchive
                 try { confirmed=Confirm("仍有任务在 "+String.Join("、",active.Select(s=>s.Drive))+"。停止这些任务并退出？已读文件会保留。"); }
                 finally { confirmingExit=false; }
                 if(!confirmed) { e.Cancel=true; return; }
-                closeLater=true; EndWatch();
+                closeLater=true;
                 foreach(var item in slots.Values.Where(s=>s.Worker.Current!=null).ToArray())
                 {
                     try { item.Worker.Stop(); } catch(Exception ex) { closeLater=false; e.Cancel=true; Notice(ex.Message); return; }
