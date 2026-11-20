@@ -60,6 +60,14 @@ internal static class MountedSourceTests
         Check(Evaluate(new[]{("HFS",1000L,20000L),("HFS",2000L,10000L)},new[]{"hfs"})=="","overlapping aliases do not manufacture a missing volume");
         Check(Evaluate(Array.Empty<(string,long,long)>(),new[]{"hfs"})=="","unknown or unreadable layout does not manufacture failure");
     }
+    private static void DirectoryReports() {
+        MethodInfo apply=T("MacMountedSource").GetMethod("ApplyDirectoryReport",BindingFlags.Static|BindingFlags.NonPublic);
+        var names=new List<string>();
+        apply.Invoke(null,new object[]{"{\"names\":[\"first.jpg\"],\"error\":\"\",\"note\":\"cleanup diagnostic only\"}",names});
+        Check(names.SequenceEqual(new[]{"first.jpg"}),"directory cleanup diagnostic does not turn completed listing into failure");
+        Throws(()=>apply.Invoke(null,new object[]{"{\"names\":[\"second.jpg\"],\"error\":\"actual readdir I/O error\",\"note\":\"\"}",names}),"real directory read error remains failure");
+        Check(names.SequenceEqual(new[]{"first.jpg","second.jpg"}),"partial directory names survive a coexisting read error");
+    }
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="setxattr",SetLastError=true)] private static extern int SetXattr([MarshalAs(UnmanagedType.LPUTF8Str)]string p,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,byte[] data,nuint size,uint pos,int options);
     public static void Main() {
         string temp=Path.Combine(Path.GetTempPath(),"discarchive-mounted-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(temp);
@@ -78,6 +86,7 @@ internal static class MountedSourceTests
             object stale=Source(Path.Combine(temp,"stale"),new[]{a},()=>{});string stalePhoto=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="photo.jpg");File.Delete(Path.Combine(a,"photo.jpg"));Throws(()=>Read(stale,stalePhoto),"bad individual file reports failure");string folder=Entries(stale,Path.Combine(temp,"stale")).Single(p=>Path.GetFileName(p)=="folder");Check(Read(stale,Entries(stale,folder).Single()).Length==8,"bad file does not prevent readable sibling");
             PosixNames(temp);
             Coverage();
+            DirectoryReports();
             if(OperatingSystem.IsMacOS()) {
                 string file=Path.Combine(a,"forked");File.WriteAllText(file,"data");byte[] fork=Enumerable.Range(0,600000).Select(i=>(byte)(i*11)).ToArray(),finder=new byte[32];finder[0]=65;
                 Check(SetXattr(file,"com.apple.ResourceFork",fork,(nuint)fork.Length,0,0)==0,"created synthetic resource fork");Check(SetXattr(file,"com.apple.FinderInfo",finder,32,0,0)==0,"created synthetic FinderInfo");

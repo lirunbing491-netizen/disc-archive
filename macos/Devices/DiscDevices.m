@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <dirent.h>
+#include <errno.h>
+#include <stddef.h>
 
 static NSString *DAString(id value) { return [value isKindOfClass:NSString.class] ? value : @""; }
 static NSNumber *DANumber(id value) { return [value isKindOfClass:NSNumber.class] ? value : @0; }
@@ -310,6 +313,52 @@ char *da_tracks(const char *drive, const char *token) {
 }
 void da_free(void *pointer) { free(pointer); }
 
+// Let the real SDK select BOTH fdopendir/readdir symbol aliases and struct
+// dirent layout. A managed hard-coded layout/suffix can mismatch Intel Darwin.
+char *da_list_directory(int fd) {
+    @autoreleasepool {
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        NSMutableArray<NSString *> *errors = [NSMutableArray array];
+        NSString *cleanupNote = @"";
+        int duplicate = dup(fd);
+        if (duplicate < 0) [errors addObject:[NSString stringWithFormat:@"无法复制目录读取句柄（errno %d）。", errno]];
+        else {
+            DIR *directory = fdopendir(duplicate);
+            if (!directory) {
+                int failure = errno;
+                if (close(duplicate) != 0) cleanupNote = [NSString stringWithFormat:@"目录副本句柄退出清理异常（errno %d）；不改变已读取条目状态。", errno];
+                [errors addObject:[NSString stringWithFormat:@"无法遍历已打开目录（errno %d）。", failure]];
+            } else {
+                unsigned invalid = 0;
+                for (;;) {
+                    errno = 0;
+                    struct dirent *entry = readdir(directory);
+                    if (!entry) {
+                        int failure = errno;
+                        if (failure) [errors addObject:[NSString stringWithFormat:@"目录遍历中断（errno %d）。", failure]];
+                        break;
+                    }
+                    size_t length = strnlen(entry->d_name, sizeof(entry->d_name));
+                    if (!length || length == sizeof(entry->d_name) || length != entry->d_namlen ||
+                        entry->d_reclen < offsetof(struct dirent, d_name) + length + 1) { ++invalid; continue; }
+                    NSString *name = [[NSString alloc] initWithBytes:entry->d_name length:length encoding:NSUTF8StringEncoding];
+                    if (!name || [name rangeOfString:@"/"].location != NSNotFound) { ++invalid; continue; }
+                    if ([name isEqualToString:@"."] || [name isEqualToString:@".."]) continue;
+                    [names addObject:name];
+                }
+                if (invalid) [errors addObject:[NSString stringWithFormat:@"%u 个目录条目的边界或UTF-8名称无法无损表示；已保留其余可读同级项。", invalid]];
+                if (closedir(directory) != 0) cleanupNote = [NSString stringWithFormat:@"目录读取句柄退出清理异常（errno %d）；不改变已读取条目状态。", errno];
+            }
+        }
+        [names sortUsingSelector:@selector(compare:)];
+        NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"names":names, @"error":[errors componentsJoinedByString:@" "], @"note":cleanupNote} options:0 error:NULL];
+        if (!data) return NULL;
+        char *result = malloc(data.length + 1);
+        if (!result) return NULL;
+        memcpy(result, data.bytes, data.length); result[data.length] = '\0'; return result;
+    }
+}
+
 #ifdef DA_DEVICES_TEST
 #include <assert.h>
 int main(void) {
@@ -353,6 +402,11 @@ int main(void) {
         assert([dataReport[@"note"] containsString:@"完整物理覆盖仍未知"]);
         dataTOC[1] = 12; // Partial descriptor is invalid, never negative evidence.
         assert(!DATOCReport([NSData dataWithBytes:dataTOC length:sizeof(dataTOC)]));
+        char *directoryError = da_list_directory(-1);
+        assert(directoryError);
+        NSDictionary *directoryReport = [NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:directoryError length:strlen(directoryError)] options:0 error:NULL];
+        assert([directoryReport[@"names"] count] == 0 && [directoryReport[@"error"] length] > 0);
+        da_free(directoryError);
         puts("DiscDevices synthetic policy tests passed (no hardware accessed).");
     }
     return 0;

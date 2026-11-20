@@ -44,13 +44,14 @@ build_core() {
   dotnet run -c Release --project "$repo/macos/tests/MountedSourceTests.csproj"
   dotnet run -c Release --project "$repo/macos/tests/CoreBehaviorTests.csproj"
 }
-build_devices >"$out/devices.log" 2>&1 & device_pid=$!
+# Both the workbench and mounted-directory tests use the same SDK-built bridge.
+build_devices
 build_ui >"$out/ui.log" 2>&1 & ui_pid=$!
 test_ipc >"$out/ipc.log" 2>&1 & ipc_pid=$!
 build_archive >"$out/archive.log" 2>&1 & archive_pid=$!
 build_core >"$out/core.log" 2>&1 & core_pid=$!
 result=0
-for component in devices:$device_pid ui:$ui_pid ipc:$ipc_pid archive:$archive_pid core:$core_pid; do
+for component in ui:$ui_pid ipc:$ipc_pid archive:$archive_pid core:$core_pid; do
   name="${component%:*}"
   if wait "${component#*:}"; then
     echo "$name passed"; tail -n 3 "$out/$name.log"
@@ -77,6 +78,17 @@ done
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$bin/DiscArchive" --check-package
+python3 - "$out/fixtures/label.png" <<'PY'
+import struct, sys, zlib
+def chunk(kind, data):
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+header = struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0)
+pixels = (b"\0" + bytes((190, 205, 218)) * 16) * 16
+with open(sys.argv[1], "wb") as output:
+    output.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+PY
+"$bin/DiscArchive" thumbnail "$out/fixtures/label.png" "$out/fixtures/thumbnail.jpg"
+sips -g format "$out/fixtures/thumbnail.jpg" | grep -q 'format: jpeg'
 "$helpers/discarchive-core" devices
 "$bin/DiscArchive" --check-workbench
 [[ $result == 0 ]] || exit 1

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 
 namespace DiscArchive;
@@ -164,40 +165,52 @@ internal sealed class MacMountedSource : DiscSource
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="open",SetLastError=true)] private static extern int NativeOpen([MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="openat",SetLastError=true)] private static extern int NativeOpenAt(int fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
     [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="fgetxattr",SetLastError=true)] private static extern nint FGetXattr(SafeFileHandle fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,byte[] data,nuint length,uint position,int options);
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="dup",SetLastError=true)] private static extern int DuplicateFd(int fd);
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="fdopendir",SetLastError=true)] private static extern IntPtr FdOpenDir(int fd);
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="closedir")] private static extern int CloseDir(IntPtr directory);
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="__error")] private static extern IntPtr ErrorPointer();
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="readdir")] private static extern IntPtr ReadDir(IntPtr directory);
-    [DllImport("/usr/lib/libSystem.B.dylib",EntryPoint="readdir$INODE64")] private static extern IntPtr ReadDirInode64(IntPtr directory);
+    private sealed class DirectoryNative {
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate IntPtr ListFn(int fd);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)] internal delegate void FreeFn(IntPtr pointer);
+        internal readonly ListFn List;
+        internal readonly FreeFn Free;
+        // Keep the image and its delegates alive for the process. The loader's
+        // architecture selection and SDK dirent ABI belong to this native image.
+        private readonly IntPtr library;
+        internal DirectoryNative() {
+            string path=Environment.GetEnvironmentVariable("DISCARC_DEVICE_LIB");
+            if(string.IsNullOrEmpty(path)||!Path.IsPathFullyQualified(path))throw new IOException("应用包缺少原生目录读取组件。");
+            try {
+                library=NativeLibrary.Load(path);
+                List=Marshal.GetDelegateForFunctionPointer<ListFn>(NativeLibrary.GetExport(library,"da_list_directory"));
+                Free=Marshal.GetDelegateForFunctionPointer<FreeFn>(NativeLibrary.GetExport(library,"da_free"));
+            }catch(Exception ex) when(ex is DllNotFoundException||ex is EntryPointNotFoundException||ex is BadImageFormatException) {
+                if(library!=IntPtr.Zero)NativeLibrary.Free(library);
+                throw new IOException("原生目录读取组件不完整或架构不匹配。",ex);
+            }
+        }
+    }
+    private static readonly Lazy<DirectoryNative> DirectoryApi=new(()=>new DirectoryNative());
     private static void ReadDarwinNames(SafeFileHandle handle,List<string> names)
     {
-        int fd=DuplicateFd(handle.DangerousGetHandle().ToInt32());
-        if(fd<0)throw new IOException("无法复制目录读取句柄（errno "+Marshal.GetLastWin32Error()+"）。");
-        using var duplicate=new SafeFileHandle((IntPtr)fd,true);
-        IntPtr directory=FdOpenDir(fd);
-        if(directory==IntPtr.Zero)throw new IOException("无法遍历已打开目录（errno "+Marshal.GetLastWin32Error()+"）。");
-        duplicate.SetHandleAsInvalid(); // fdopendir owns this descriptor now.
+        DirectoryNative api=DirectoryApi.Value;
+        IntPtr pointer=api.List(handle.DangerousGetHandle().ToInt32());
+        GC.KeepAlive(handle);
+        if(pointer==IntPtr.Zero)throw new IOException("原生目录读取没有返回清单。");
+        try { ApplyDirectoryReport(Marshal.PtrToStringUTF8(pointer)??throw new IOException("原生目录清单为空。"),names); }
+        finally{api.Free(pointer);}
+    }
+    private static void ApplyDirectoryReport(string json,List<string> names)
+    {
         try {
-            IntPtr error=ErrorPointer();
-            var utf8=new UTF8Encoding(false,true);
-            while(true) {
-                Marshal.WriteInt32(error,0);
-                // Darwin x64 needs the modern inode64 symbol; arm64 uses it
-                // without a suffix. Both have Apple's __DARWIN_STRUCT_DIRENTRY
-                // layout: reclen@16, namlen@18, type@20, UTF-8 name@21.
-                IntPtr entry=RuntimeInformation.ProcessArchitecture==Architecture.X64?ReadDirInode64(directory):ReadDir(directory);
-                if(entry==IntPtr.Zero) {int code=Marshal.ReadInt32(error);if(code!=0)throw new IOException("目录遍历中断（errno "+code+"）。");break;}
-                int record=(ushort)Marshal.ReadInt16(entry,16),length=(ushort)Marshal.ReadInt16(entry,18);
-                if(length<1||length>1023||record<22+length)throw new IOException("系统目录条目边界无效。");
-                byte[] bytes=new byte[length];Marshal.Copy(IntPtr.Add(entry,21),bytes,0,length);
-                string name;
-                try{name=utf8.GetString(bytes);}catch(DecoderFallbackException ex){throw new IOException("目录含无法无损表示的UTF-8名称。",ex);}
-                if(name=="."||name=="..")continue;
-                if(name.IndexOf('\0')>=0||name.IndexOf('/')>=0)throw new IOException("系统目录条目名称无效。");
+            using var report=JsonDocument.Parse(json);
+            foreach(var entry in report.RootElement.GetProperty("names").EnumerateArray()) {
+                string name=entry.GetString();
+                if(string.IsNullOrEmpty(name)||name=="."||name==".."||name.IndexOf('\0')>=0||name.IndexOf('/')>=0)throw new IOException("原生目录清单含无效名称。");
                 names.Add(name);
             }
-        }finally{CloseDir(directory);}
+            if(report.RootElement.TryGetProperty("note",out var note)&&note.ValueKind==JsonValueKind.String&&!string.IsNullOrEmpty(note.GetString()))Console.Error.WriteLine("DiscArchive directory cleanup: "+note.GetString());
+            string error=report.RootElement.GetProperty("error").GetString();
+            if(!string.IsNullOrEmpty(error))throw new IOException(error); // Keep already-added sibling names.
+        }catch(Exception ex) when(ex is JsonException||ex is KeyNotFoundException||ex is InvalidOperationException) {
+            throw new IOException("原生目录清单格式无效。",ex);
+        }
     }
     private static SafeFileHandle OpenDarwin(string root,string relative,bool directory)
     {

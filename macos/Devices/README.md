@@ -22,6 +22,7 @@ xcrun clang -fobjc-arc -fblocks -Wall -Wextra -mmacosx-version-min=13.0 -DDA_DEV
 - `da_devices()`：返回由 `malloc` 分配、以 NUL 结尾的 UTF-8 JSON。失败返回 NULL，调用方应显示发现失败并暂停，不能将其当成“没有设备”。用 `da_free()` 释放返回值。可在后台线程定期调用；每次重新查询 IOKit 和挂载卷，不缓存设备列表。
 - `da_verify(drive, token)`：通过 IOKit 核对当前 provider ID、全部 IOMedia ID 及有效逻辑节点是否仍存在，匹配才返回 1。为重复读取设计，不枚举目标卷、不建立 DA 会话、不轮询 DiscRecording 状态、不读盘面，不运行子进程。它不能证明驱动器当前没有忙碌或介质错误；此检查应在每个有界读取之前和之后调用，仍需处理检查与后续 open/read 间的竞态、ENXIO、EIO 和节点被替换。核对失败时不能把该读取块写成有效恢复结果。
 - `da_tracks(drive, token)`：返回 `{uncovered:bool,note:string}`，使用 IOMedia 已发布且长度完整的 CD TOC 检查音轨及多会话。仅可靠证据显示音轨或多个会话时 `uncovered=true`；普通单一数据视图或没有可靠 TOC 时返回 false，说明覆盖未知，不将普通数据 DVD 仅因缺少 TOC 判成失败或部分完成。false 也不是完整物理覆盖证明；实际可见数据的成功状态由恢复流程判定。前后核对相同介质，不发出底层读取轨道命令。返回值同样由 `da_free()` 释放。
+- `da_list_directory(fd)`：对已安全打开的目录句柄复制后枚举，返回 `{names:[string...],error:string,note:string}`；不关闭调用方原句柄。由真实 SDK 编译 `fdopendir`、`readdir` 和 `struct dirent`，自动选择 Intel/Apple Silicon 的系统符号及结构，托管侧不猜结构偏移或符号后缀。错误与已枚举名称可同时返回，保留可读兄弟；正常 EOF 无错误，真正读取错误或无法表示的名称才令清点不完整。关闭目录的退出清理异常仅进入 `note`，不将已完成目录清点降为部分完成。返回值由 `da_free()` 释放。挂载源与测试使用 `DISCARC_DEVICE_LIB` 指向这个已构建动态库，必须先构建此库再运行真实 Mac 挂载测试。
 - token 绑定当前进程会话随机 UUID、光驱 IORegistry entry ID 及全部介质 IORegistry entry ID，不依赖卷标、BSD 名或挂载路径，不用于判断两次插入是否为同一内容。UI 只传 drive ID 给 core；每个 core 必须调用自己的 `da_devices` 取得 token，再调用同进程 `da_verify`，不能拿 UI 或另一 worker 的 token 校验。验证函数会在查询硬件前拒绝来自其他会话、空值、无效 UTF-8 及超长/不合法 ID。应用重启或介质重新发布时需取得新 token；该字段不能当成跨进程/跨启动的恢复任务永久 ID。
 - 无法区分驱动未报告的物理换盘。身份保障基于 macOS 发布/撤销 IOMedia 实例这一实际边界；不声称能识别硬件或系统从未报告的变化。
 

@@ -6,6 +6,8 @@
 
 打开仓库 Actions 中本分支绿色的 **Mac native build and tests** 记录，下载产物 **DiscArchive-macOS-Universal**。解开外层下载包，再解开其中的 `DiscArchive-macOS-Universal.zip`，双击 `DiscArchive.app`。同级 `SHA256.txt` 是内层 ZIP 的摘要。测试包使用本地签名，尚未经过 Apple 开发者身份签名和公证。
 
+如果第一次打开时提示无法验证开发者，确认下载来自本仓库后，可在系统设置的“隐私与安全性”里为这个应用选择“仍要打开”。[Apple 操作说明](https://support.apple.com/zh-cn/102445)
+
 ## 导第一张盘
 
 1. 接好光驱和备份盘，在导盘页选实际使用的光驱和备份文件夹。多台光驱可分别操作，同一台电脑上也可切换备份盘。
