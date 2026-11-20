@@ -29,7 +29,7 @@ make -C "$src/CPP/7zip/Bundles/Format7zF" -f makefile.gcc -j "${JOBS:-4}" \
   LFLAGS_NOEXECSTACK= LFLAGS_SRC_VER=
 cp "$src/CPP/7zip/Bundles/Format7zF/_o/7z.so" "$out/7z.so"
 # MyWindows.cpp supplies the same Unix PROPVARIANT/BSTR allocation ABI.
-$cxx -std=c++17 -O2 -fPIC $extra $link -I "$src" \
+$cxx -std=c++17 -O2 -fPIC -pthread $extra $link -I "$src" \
   "$here/native/discarchive7z.cpp" "$src/CPP/Common/MyWindows.cpp" \
   $dl -o "$out/$bridge"
 test -s "$out/7z.so"

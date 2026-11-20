@@ -12,8 +12,15 @@ enum MacBundle {
     #endif
     static let helpers = contents.appendingPathComponent("Helpers/" + arch, isDirectory: true)
     static let core = helpers.appendingPathComponent("discarchive-core")
-    static let state = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("DiscArchive/Mac", isDirectory: true)
+    static let checkingWorkbench = CommandLine.arguments == [CommandLine.arguments[0], "--check-workbench"]
+    static let state: URL = {
+        if checkingWorkbench {
+            return FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("DiscArchive-check-" + UUID().uuidString, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("DiscArchive/Mac", isDirectory: true)
+    }()
     static var environment: [String: String] {
         var values = ProcessInfo.processInfo.environment
         values["DISCARC_MEDIA_HELPER"] = Bundle.main.executableURL?.path
@@ -39,6 +46,23 @@ enum MacBundle {
 
 @main @MainActor
 struct ApplicationEntry {
+    // Exercise the packaged window, native hardware inventory and bundled core together.
+    @MainActor private static func checkWorkbench(_ app: NSApplication, deadline: Date) {
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        if let window = app.windows.first(where: { $0.isVisible && $0.title == "光盘归档工作台" }),
+           let root = window.contentView {
+            let all = views(root)
+            let labels = all.compactMap { $0 as? NSTabView }.first?.tabViewItems.map { $0.label }
+            let ready = all.compactMap { $0 as? NSTextField }.contains { $0.stringValue.hasPrefix("发现 ") }
+            if labels == ["导盘", "登记册", "摄像头", "识图设置"] && ready {
+                print("PASS packaged AppKit window, four tabs, startup recovery and native device inventory")
+                app.terminate(nil)
+                return
+            }
+        }
+        if Date() >= deadline { fputs("Packaged workbench did not become ready.\n", stderr); exit(5) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { checkWorkbench(app, deadline: deadline) }
+    }
     static func main() {
         let args = CommandLine.arguments
         if args.count == 4 && args[1] == "thumbnail" {
@@ -70,6 +94,10 @@ struct ApplicationEntry {
             defer { close(fd) }
             let desk=Desk()
             app.setActivationPolicy(.regular); app.delegate=desk
+            if MacBundle.checkingWorkbench {
+                let deadline = Date().addingTimeInterval(35)
+                DispatchQueue.main.async { checkWorkbench(app, deadline: deadline) }
+            }
             withExtendedLifetime(desk) { app.run() }
         } catch {
             let alert=NSAlert();alert.messageText="导盘助手无法启动";alert.informativeText=error.localizedDescription;alert.runModal()

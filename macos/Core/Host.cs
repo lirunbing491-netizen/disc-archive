@@ -14,7 +14,7 @@ namespace DiscArchive;
 
 internal sealed class HostRequest
 {
-    public string photo="",target="",targetId="",drive="",project="",existingProject="",mode="metadata",view="auto",resumeId="",driveToken="",mediaHint="";
+    public string photo="",target="",targetId="",targetDeviceId="",drive="",project="",existingProject="",mode="metadata",view="auto",resumeId="",driveToken="",mediaHint="";
     public string path="",id="",title="";
     public bool emptyAtShutter;
 }
@@ -76,12 +76,12 @@ internal sealed class Host
             {
                 case "devices":var inventory=snapshot();Emit(new{ok=true,drives=inventory.drives,targets=inventory.targets});break;
                 case "recover":Workstation.RecoverInterrupted(Book());Emit(new{ok=true});break;
-                case "list":Emit(new{entries=Book().List()});break;
-                case "projects":var p=await Request();ValidateTarget(p.target,snapshot());Emit(new{projects=ProjectAliases.ListKnownProjects(p.target,CancellationToken.None)});break;
+                case "list":Emit(new{ok=true,entries=Book().List()});break;
+                case "projects":var p=await Request();ValidateTarget(p.target,snapshot());Emit(new{ok=true,projects=ProjectAliases.ListKnownProjects(p.target,CancellationToken.None)});break;
                 case "export":var e=await Request();ValidateOutput(e.path);var book=Book();book.Export(e.path);Emit(new{ok=true,count=book.List().Count});break;
                 case "exportTarget":var t=await Request();ValidateTarget(t.target,snapshot());ValidateOutput(t.path);Emit(new{ok=true,count=Book().ExportTarget(t.target,t.path)});break;
                 case "edit":var edit=await Request();var catalog=Book();var row=catalog.List().SingleOrDefault(x=>x.Id==edit.id)??throw new IOException("未找到本机盘号。");catalog.Edit(row,edit.title,edit.project);Emit(new{ok=true});break;
-                case "inspect":var request=await Request();if(!snapshot().drives.Any(x=>x.id==request.drive))throw new IOException("所选光驱已断开。");Emit(new{text=inspect(request.drive)});break;
+                case "inspect":var request=await Request();if(!snapshot().drives.Any(x=>x.id==request.drive))throw new IOException("所选光驱已断开。");Emit(new{ok=true,text=inspect(request.drive)});break;
                 case "job":return await Job(await Request());
                 default:throw new IOException("未知命令。可使用 --help 查看。");
             }
@@ -100,6 +100,24 @@ internal sealed class Host
             var mounts=drive.partitions.Select(v=>v.mount).Concat(new[]{drive.mount});
             foreach(string mount in mounts)if(!string.IsNullOrEmpty(mount)&&Path.IsPathFullyQualified(mount)&&Under(mount,target))throw new IOException("归档位置不能是光盘本身或其子目录。");
         }
+    }
+    private static void ValidateTargetDevice(HostRequest request,MacInventory inventory)
+    {
+        if(string.IsNullOrEmpty(request.targetDeviceId))return;
+        var volume=inventory.targets.Where(t=>!string.IsNullOrEmpty(t.path)&&Path.IsPathFullyQualified(t.path)&&Under(t.path,request.target))
+            .OrderByDescending(t=>Path.GetFullPath(t.path).TrimEnd(Path.DirectorySeparatorChar).Length).FirstOrDefault();
+        if(volume==null||volume.id!=request.targetDeviceId)throw new IOException("所选归档卷已断开或同一路径已被其他硬盘替换，请重新选择归档位置。");
+    }
+    private static string TargetMarker(HostRequest request)
+    {
+        Guid parsed;
+        if(!string.IsNullOrEmpty(request.targetId)&&!Guid.TryParseExact(request.targetId,"N",out parsed))
+            throw new IOException("归档目录身份必须是登记标记GUID；设备卷身份请使用targetDeviceId。");
+        string marker=Path.Combine(request.target,".discarchive-target.id");Catalog.CheckNoLinks(marker);
+        string existing=File.Exists(marker)?File.ReadAllText(marker).Trim():"";
+        if(!string.IsNullOrEmpty(request.targetId)&&existing!=request.targetId)throw new IOException("归档目录登记标记已改变，请核对原备份位置。");
+        if(existing.Length>0&&!Guid.TryParseExact(existing,"N",out parsed))throw new IOException("归档目录登记标记损坏。");
+        return existing;
     }
     private static void ValidateOutput(string path)
     {if(string.IsNullOrWhiteSpace(path)||!Path.IsPathFullyQualified(path)||!Directory.Exists(Path.GetDirectoryName(path)))throw new IOException("请选择现有目录中的导出文件。");Catalog.CheckNoLinks(path);}
@@ -136,7 +154,7 @@ internal sealed class Host
         int separator=(initialDrive.token??"").IndexOf(':');
         bool changedSinceShutter=!string.IsNullOrEmpty(request.mediaHint)&&separator>=0&&
             !String.Equals(initialDrive.token.Substring(separator+1),request.mediaHint,StringComparison.Ordinal);
-        ValidateTarget(request.target,initial);
+        ValidateTarget(request.target,initial);ValidateTargetDevice(request,initial);
         if(string.IsNullOrEmpty(request.resumeId)&&(!Path.IsPathFullyQualified(request.photo)||!File.Exists(request.photo)))throw new IOException("登记照片不存在。");
         IReader native=createReader();if(native is MacReader mac)mac.View=MacReader.ParseView(request.view);
         var reader=new BoundReader(native,snapshot,request.drive);
@@ -164,8 +182,10 @@ internal sealed class Host
         Entry registered;
         try
         {
+            MacInventory registrationInventory=snapshot();ValidateTarget(request.target,registrationInventory);ValidateTargetDevice(request,registrationInventory);
+            string marker=TargetMarker(request);
             registered=string.IsNullOrEmpty(request.resumeId)
-                ?station.Register(request.photo,request.target,request.targetId,request.drive,request.project??"",empty,request.existingProject)
+                ?station.Register(request.photo,request.target,marker,request.drive,request.project??"",empty,request.existingProject)
                 :station.ResumeKnown(request.target,request.resumeId,request.drive);
             Emit(new{@event="registered",id=registered.Id,photo=registered.Photo,drive=registered.Drive,targetId=registered.TargetId});
             registrationPublished.TrySetResult(true);
@@ -212,7 +232,7 @@ internal sealed class Host
                     }
                     else if(!canceled&&control.action=="project")
                     {
-                        lock(choiceGate){if(projectChoice!=null){if(control.value==proposed||projects.Contains(control.value,StringComparer.Ordinal)){projectChoice.TrySetResult(control.value);projectChoice=null;}else Status("项目目录不在当前候选中，请重新选择。");}}
+                        lock(choiceGate){if(projectChoice!=null){if(control.value==proposed||projects.Contains(control.value,StringComparer.Ordinal)){projectChoice.TrySetResult(control.value);projectChoice=null;}else {Status("项目目录不在当前候选中，请重新选择。");Emit(new{@event="project",proposed,options=projects});}}}
                     }
                 }
                 if(copying!=null&&copying.IsCompleted){Entry result=await copying;Emit(new{@event="result",entry=result});return 0;}
@@ -224,7 +244,7 @@ internal sealed class Host
                     bool can=await station.CanStart(confirmed);
                     if(can)
                     {
-                        ValidateTarget(request.target,snapshot());
+                        MacInventory startInventory=snapshot();ValidateTarget(request.target,startInventory);ValidateTargetDevice(request,startInventory);
                         copying=station.Copy(Status);
                     }
                     else if(confirmed){confirmed=false;reader.Expected=null;Status("光盘在确认期间变化，请重新核对并确认。");}

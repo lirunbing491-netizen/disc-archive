@@ -41,8 +41,8 @@ build_archive() {
 build_core() {
   dotnet publish "$repo/macos/Core/DiscArchiveCore.csproj" -c Release -r "osx-$arch" --self-contained true \
     -p:DebugType=None -p:DebugSymbols=false -p:PublishReadyToRun=false -o "$helpers"
-  dotnet run -c Release --project "$repo/macos/tests/CoreBehaviorTests.csproj"
   dotnet run -c Release --project "$repo/macos/tests/MountedSourceTests.csproj"
+  dotnet run -c Release --project "$repo/macos/tests/CoreBehaviorTests.csproj"
 }
 build_devices >"$out/devices.log" 2>&1 & device_pid=$!
 build_ui >"$out/ui.log" 2>&1 & ui_pid=$!
@@ -74,4 +74,5 @@ codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict "$app"
 "$bin/DiscArchive" --check-package
 "$helpers/discarchive-core" devices
+"$bin/DiscArchive" --check-workbench
 printf 'Built and tested %s slice in %s\n' "$cpu" "$app"

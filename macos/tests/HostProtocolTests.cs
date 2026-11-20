@@ -39,10 +39,10 @@ internal static class HostProtocolTests
     }
     private sealed class Device:IReader
     {
-        internal string Source,Token="worker-process:provider:disc-A";
+        internal string Source,Token="worker-process:provider:disc-A",TargetPath="",TargetDeviceId="12345";
         internal bool EmptyTray,ReadyFlag=true,ChangeWhenOpened;
         internal int Opens;
-        internal MacInventory Snapshot()=>new MacInventory{drives=new[]{new MacDrive{id="test-optical",ready=ReadyFlag,empty=EmptyTray,token=Token}},targets=Array.Empty<MacTarget>()};
+        internal MacInventory Snapshot()=>new MacInventory{drives=new[]{new MacDrive{id="test-optical",ready=ReadyFlag,empty=EmptyTray,token=Token}},targets=TargetPath.Length==0?Array.Empty<MacTarget>():new[]{new MacTarget{path=Path.GetPathRoot(TargetPath),id="system-volume",name="Synthetic parent mount"},new MacTarget{path=TargetPath,id=TargetDeviceId,name="Synthetic external disk"}}};
         public string[] Drives()=>new[]{"test-optical"};
         public bool Empty(string drive)=>EmptyTray;
         public bool Ready(string drive)=>ReadyFlag;
@@ -57,13 +57,36 @@ internal static class HostProtocolTests
         var device=new Device{Source=source};var input=new Input();var output=new Output();
         var host=new Host(input,output,Path.Combine(area,"state"),()=>device,device.Snapshot,id=>"synthetic inspection");
         string target=Path.Combine(area,"backup");Directory.CreateDirectory(target);string photo=Path.Combine(area,"photo.bin");File.WriteAllText(photo,"full-photo");
-        input.Send(new HostRequest{photo=photo,target=target,drive="test-optical",project="240102-Test",emptyAtShutter=true,driveToken="foreign-ui-token",mediaHint="ui-old-media",mode=name.StartsWith("recognition",StringComparison.Ordinal)?"ocr":"metadata"});
+        if(name.StartsWith("target-device",StringComparison.Ordinal))device.TargetPath=target;
+        input.Send(new HostRequest{photo=photo,target=target,targetDeviceId=name.StartsWith("target-device",StringComparison.Ordinal)?"12345":"",drive="test-optical",project=name=="project-retry"?"240102-Client":"240102-Test",emptyAtShutter=true,driveToken="foreign-ui-token",mediaHint="ui-old-media",mode=name.StartsWith("recognition",StringComparison.Ordinal)?"ocr":"metadata"});
         await test(host,device,input,output);
+    }
+    private static async Task OneShotReplies(string root)
+    {
+        string target=Path.Combine(root,"one-shot-target");Directory.CreateDirectory(target);
+        Directory.CreateDirectory(Path.Combine(target,"240102-Project"));
+        var device=new Device();
+        foreach(string command in new[]{"list","projects","inspect"})
+        {
+            var request=new HostRequest{target=target,drive="test-optical"};
+            using var input=new StringReader(JsonSerializer.Serialize(request,Host.Json)+"\n");
+            using var output=new StringWriter();
+            var host=new Host(input,output,Path.Combine(root,"one-shot-state"),()=>device,device.Snapshot,id=>"synthetic inspection");
+            int code=await host.Run(command);
+            var response=JsonDocument.Parse(output.ToString()).RootElement;
+            // Match CoreIPC.run's actual success gate: process exit zero AND ok true.
+            bool accepted=code==0&&response.TryGetProperty("ok",out var ok)&&ok.ValueKind==JsonValueKind.True;
+            bool payload=command=="list" ? response.GetProperty("entries").ValueKind==JsonValueKind.Array :
+                command=="projects" ? response.GetProperty("projects").EnumerateArray().Any(x=>x.GetString()=="240102-Project") :
+                response.GetProperty("text").GetString()=="synthetic inspection";
+            Check(accepted&&payload,command+" success envelope passes CoreIPC.run and preserves UI payload field");
+        }
     }
     internal static async Task Run()
     {
         string root=Path.Combine(Path.GetTempPath(),"discarchive-protocol-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         PortableSupport.ThumbnailForTests=s=>new byte[]{255,216,255,217};
+        await OneShotReplies(root);
         await Case(root,"confirm",async(host,device,input,output)=>{
             string area=Path.GetDirectoryName(device.Source);
             var book=new Catalog(Path.Combine(area,"state"));
@@ -109,6 +132,35 @@ internal static class HostProtocolTests
             input.Lines.Writer.TryComplete();var result=await output.Event("result");
             Check(result.GetProperty("entry").GetProperty("Status").GetString()==Workstation.Paused,"stdin EOF cancels an active job waiting for recognition");
             Check(await running==0,"cancel closes asynchronous recognition without hanging");
+        });
+        await Case(root,"project-retry",async(host,device,input,output)=>{
+            string target=Path.Combine(Path.GetDirectoryName(device.Source),"backup");
+            Directory.CreateDirectory(Path.Combine(target,"240102-Clienx"));
+            var running=host.Run("job");await output.Event("registered");input.Send(new{action="confirm"});
+            var first=await output.Event("project");input.Send(new{action="project",value="240102-Unlisted"});
+            var repeated=await output.Event("project");
+            Check(first.GetProperty("proposed").GetString()==repeated.GetProperty("proposed").GetString()&&
+                first.GetProperty("options").GetRawText()==repeated.GetProperty("options").GetRawText(),"invalid project reply republishes the same actionable choice");
+            input.Send(new{action="project",value=repeated.GetProperty("proposed").GetString()});
+            var result=await output.Event("result");
+            Check(result.GetProperty("entry").GetProperty("Status").GetString()==Workstation.Done&&await running==0,"republished project choice can finish without a hung job");
+            input.Lines.Writer.TryComplete();
+        });
+        await Case(root,"target-device-valid",async(host,device,input,output)=>{
+            var running=host.Run("job");var registration=await output.Event("registered");
+            Check(Guid.TryParseExact(registration.GetProperty("targetId").GetString(),"N",out var marker)&&registration.GetProperty("targetId").GetString()!="12345","numeric external volume id is distinct from the newly created archive marker GUID");
+            input.Send(new{action="confirm"});var result=await output.Event("result");
+            Check(result.GetProperty("entry").GetProperty("Status").GetString()==Workstation.Done&&await running==0,"numeric external volume identity permits registration and copying");input.Lines.Writer.TryComplete();
+        });
+        await Case(root,"target-device-replaced",async(host,device,input,output)=>{
+            var running=host.Run("job");await output.Event("registered");device.TargetDeviceId="99999";input.Send(new{action="confirm"});
+            using var timeout=new CancellationTokenSource(10000);JsonElement failure=default;
+            while(await output.Lines.Reader.WaitToReadAsync(timeout.Token)){
+                failure=JsonDocument.Parse(await output.Lines.Reader.ReadAsync(timeout.Token)).RootElement.Clone();
+                if(failure.TryGetProperty("event",out var kind)&&kind.GetString()=="error")break;
+            }
+            Check(failure.GetProperty("text").GetString().Contains("其他硬盘替换")&&await running==1&&device.Opens==0,"replacement disk at the same target path is refused before opening source media");
+            input.Lines.Writer.TryComplete();
         });
         PortableSupport.ThumbnailForTests=null;
         Check(!JsonSerializer.Serialize(new Entry{Id="TEST"},Host.Json).Contains("\"id\""),"Entry fields keep PascalCase in protocol");

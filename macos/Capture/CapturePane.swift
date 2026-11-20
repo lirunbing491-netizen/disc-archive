@@ -16,8 +16,8 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let queue = DispatchQueue(label: "com.discarchive.mac.camera")
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var devices: [AVCaptureDevice] = []
-    private var frame: CVPixelBuffer?
-    private var frameTime = Date.distantPast
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestSampleAt = Date.distantPast
     private var enabled = true
     private var running = false
     private var capturing = false
@@ -73,7 +73,7 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
             self.session.beginConfiguration()
             self.session.inputs.forEach { self.session.removeInput($0) }
             self.session.outputs.forEach { self.session.removeOutput($0) }
-            self.session.commitConfiguration(); self.frame = nil
+            self.session.commitConfiguration(); self.latestPixelBuffer = nil
         }
         status.stringValue = "摄像头已关闭。"; updateButtons()
     }
@@ -126,7 +126,7 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        frame = CMSampleBufferGetImageBuffer(sampleBuffer); frameTime = Date()
+        latestPixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer); latestSampleAt = Date()
     }
     @objc private func takePhoto() {
         guard enabled, running, !capturing else { return }
@@ -138,7 +138,7 @@ final class CapturePane: NSView, AVCaptureVideoDataOutputSampleBufferDelegate {
         queue.async { [weak self] in
             guard let self = self else { return }
             do {
-                guard let pixels = self.frame, Date().timeIntervalSince(self.frameTime) < 1.5 else { throw CaptureFailure("未收到新画面，请检查摄像头后重拍。") }
+                guard let pixels = self.latestPixelBuffer, Date().timeIntervalSince(self.latestSampleAt) < 1.5 else { throw CaptureFailure("未收到新画面，请检查摄像头后重拍。") }
                 let image = CIImage(cvPixelBuffer: pixels)
                 guard let fullFrame = CIContext().createCGImage(image, from: image.extent) else { throw CaptureFailure("无法生成完整画面。") }
                 let data = try VisionPrivacy.jpeg(fullFrame)

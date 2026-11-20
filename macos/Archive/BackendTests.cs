@@ -85,7 +85,7 @@ internal static class BackendTests {
         p+=HfsRecord(b,leaf+p,2,17,secondName,false,0x81A4,24,false);
         BE(b,leaf+4088,(ulong)p,2); return b;
     }
-    private static void ExpectFailure(Action action, string name) { try { action(); } catch(IOException) { Check(true,name); return; } throw new Exception("Expected failure: " + name); }
+    private static void ExpectFailure(Action action, string name) { try { action(); } catch(Exception error) when(error is IOException || error is InvalidDataException) { Check(true,name); return; } throw new Exception("Expected failure: " + name); }
     private static void Verify(byte[] image, string format, string name) {
         using var source = new MemoryStream(image,false); using var reader = SevenZipReader.Open(source,format);
         var data = reader.Items.Single(i=>!i.IsDirectory && !i.IsAltStream && !i.IsLink && i.Path.EndsWith(name,StringComparison.Ordinal));
@@ -106,9 +106,21 @@ internal static class BackendTests {
         internal bool Fail;
         public override int Read(byte[] b,int o,int n) { if(Fail) throw new IOException("injected source fault"); return base.Read(b,o,n); }
     }
+    private sealed class CountingStream(byte[] image) : MemoryStream(image,false) {
+        internal long Bytes;
+        public override int Read(byte[] b,int o,int n) { int done=base.Read(b,o,n); Bytes+=done; return done; }
+    }
     public static int Main(string[] args) {
         try {
             Verify(Iso(),"ISO","HELLO.TXT");
+            byte[] large=new byte[2*1024*1024]; Iso().CopyTo(large,0);
+            Both(large,16*2048+80,1024,4); Both(large,20*2048+68+10,1024*1024,4);
+            using(var source=new CountingStream(large)) using(var reader=SevenZipReader.Open(source,"ISO")) {
+                var data=reader.Items.Single(i=>i.Size==1024*1024); source.Bytes=0;
+                using var stream=reader.OpenItem(data.Index); Check(source.Bytes<131072,"opening ordinary item does not decode its whole body");
+                Check(stream.ReadByte()=='h' && source.Bytes<131072,"head sampling reads only needed prefix");
+                stream.Seek(1024*1024-1,SeekOrigin.Begin); Check(stream.ReadByte()==0 && source.Bytes<262144,"tail seeking does not read intervening bytes");
+            }
             Verify(Hfs(false),"HFS+","café-文.txt"); Verify(Hfs(true),"HFSX","café-文.txt");
             Verify(Hfs(true,"literal\\slash:colon.txt"),"HFSX","literal\\slash:colon.txt");
             foreach(string secondName in new[]{"café-文.txt","CAFÉ-文.txt"}) {
